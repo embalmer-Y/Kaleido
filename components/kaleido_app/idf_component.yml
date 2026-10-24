@@ -1,0 +1,3 @@
+dependencies:
+  ## cJSON（IDF v6 起从核心移出，由组件仓库提供）
+  espressif/json: "^1"
