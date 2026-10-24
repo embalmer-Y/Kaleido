@@ -29,7 +29,7 @@ Kaleido 智能桌搭固件（**Kaleido-Claw** 架构）。架构设计：`../doc
 | esp-claw | 9b23c15bc28703369b4b7fad3e810f8cb535fb59 | ../vendor/esp-claw，Apache-2.0 |
 | muse-gadget-sdk | c9354b7a765cfb7dd3c4f1945a9ca838d871630c | ../vendor/muse-gadget-sdk，Apache-2.0；集成前闭环 tinyh264 LGPL 疑点（docs/vendor-licenses.md R-7） |
 | espressif/cjson | ^1.7（lock: 1.7.19~2） | IDF v6 起替代核心 json 组件 |
-| esp-sr | v2.6.0 | M1 接入（WakeNet/AFE，S31 preliminary） |
+| esp-sr | **2.6.0**（2026-10-24 esp32s31 编译验证通过：AFE 头文件+全组件 1300+ 目标构建 OK） | M1 接入 WakeNet/AFE（V-04 运行时验证待板卡串口权限） |
 | esp_codec_dev | v2.0.x | M2 接入（TAS5805M 播放驱动，硬件验证 N） |
 
 ## 组件地图
