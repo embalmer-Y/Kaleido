@@ -5,18 +5,32 @@ Kaleido 智能桌搭固件（**Kaleido-Claw** 架构）。架构设计：`../doc
 
 ## 状态
 
-**M0 骨架阶段**（2026-10-24）：目录结构 + KApp 框架核心代码。
-构建需 ESP-IDF v6.1（尚未安装到本机；M1 安装并出首个 CI 构建）。
+**M0 骨架已完成并通过 esp32s31 构建**（2026-10-24：`kaleido-fw.bin` 190KB，app 分区余 82%）。
+开发环境事实源见下节；板子（Korvo-1 V1.1）接入后进入 M1。
+
+## 开发环境事实源（2026-10-24 装机记录）
+
+- ESP-IDF：`~/esp/esp-idf`，**v6.1 @ `fff9895c82d744c7237be8847347bdd1b07c6643`**（浅克隆，全子模块）
+- 工具链：`~/.espressif`（riscv32-esp-elf esp-15.2.0_20251204）；Python 3.14.4 官方 venv（`idf6.1_py3.14_env`）验证可用
+- **esp32s31 为 preview target**：所有 idf.py 命令必须带 `--preview`（环境变量 `IDF_PREVIEW` 无效！）
+- **网络**：git/pip/组件下载需代理 `http://127.0.0.1:7890`（github.com 直连被墙；components.espressif.com 可直连）
+- **IDF v6 破坏性变更**：核心已无 `json` 组件——cJSON 改用组件仓库 `espressif/cjson`（组件内名 `espressif__cjson`，本仓 `components/kaleido_app/idf_component.yml` 已钉 `^1.7`）
+- 构建命令：
+  ```bash
+  bash -c '. ~/esp/esp-idf/export.sh && cd /home/emb/project/Kaleido/kaleido-fw && idf.py --preview build'
+  # 烧录（Korvo-1 接入后）：idf.py --preview -p /dev/ttyACM0 flash monitor
+  ```
 
 ## 钉版（升级走独立提交 + 回归）
 
 | 依赖 | 版本/commit | 说明 |
 |---|---|---|
-| ESP-IDF | v6.1（commit 待首个构建锁定） | esp32s31 target（preview） |
-| esp-claw | 9b23c15bc28703369b4b7fad3e810f8cb535fb59 | vendor/esp-claw，Apache-2.0 |
-| muse-gadget-sdk | c9354b7a765cfb7dd3c4f1945a9ca838d871630c | vendor/muse-gadget-sdk，Apache-2.0；集成前闭环 tinyh264 LGPL 疑点（docs/vendor-licenses.md R-7） |
-| esp-sr | v2.6.0 | WakeNet/AFE，S31 支持（preliminary） |
-| esp_codec_dev | v2.0.x | TAS5805M 播放驱动（硬件验证 N，M2 实测） |
+| ESP-IDF | v6.1 @ `fff9895c82d744c7237be8847347bdd1b07c6643` | esp32s31 preview target |
+| esp-claw | 9b23c15bc28703369b4b7fad3e810f8cb535fb59 | ../vendor/esp-claw，Apache-2.0 |
+| muse-gadget-sdk | c9354b7a765cfb7dd3c4f1945a9ca838d871630c | ../vendor/muse-gadget-sdk，Apache-2.0；集成前闭环 tinyh264 LGPL 疑点（docs/vendor-licenses.md R-7） |
+| espressif/cjson | ^1.7（lock: 1.7.19~2） | IDF v6 起替代核心 json 组件 |
+| esp-sr | v2.6.0 | M1 接入（WakeNet/AFE，S31 preliminary） |
+| esp_codec_dev | v2.0.x | M2 接入（TAS5805M 播放驱动，硬件验证 N） |
 
 ## 组件地图
 

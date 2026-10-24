@@ -1,2 +1,2 @@
-idf_component_register(INCLUDE_DIRS "include")
-# M1/M2 实现接入（架构文档 §7）
+idf_component_register(SRCS "kaleido_board.c"
+                       INCLUDE_DIRS "include")
