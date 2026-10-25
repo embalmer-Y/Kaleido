@@ -216,7 +216,7 @@ static esp_err_t app_lvgl_init(void)
     /* Initialize LVGL */
     const lvgl_port_cfg_t lvgl_cfg = {
         .task_priority = 4,         /* LVGL task priority */
-        .task_stack = 4096*4,         /* LVGL 任务堆栈大小*/
+        .task_stack = 4096*8, /* 官方控件建议 32K：thorvg 加载/渲染栈 */         /* LVGL 任务堆栈大小*/
         .task_affinity = -1,        /* LVGL task pinned to core (-1 is no affinity) */
         .task_max_sleep_ms = 500,   /* Maximum sleep in LVGL task */
         .timer_period_ms = 5        /* LVGL timer tick period in ms */
@@ -310,13 +310,22 @@ static void fps_scene_timer_cb(lv_timer_t *t)
 
 static void fps_test(void);
 int lottie_bench_run(void);
+int lottie_stage_start(void);
 
 static void fps_auto_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(2000));
     fps_test();
-    /* V-35R：ThorVG/Lottie 离屏分档标定（pthread 内跑，W-6） */
-    lottie_bench_run();
+    /* 角色舞台 L0 常驻：pthread 渲染 + LVGL 合成（bench 已归档，
+     * 撤出自动流） */
+    if (!lvgl_port_lock(10000)) {
+        printf("DSI,STAGE,ERROR=lock\r\n");
+        fflush(stdout);
+        vTaskDelete(NULL);
+        return;
+    }
+    lottie_stage_start();
+    lvgl_port_unlock();
     vTaskDelete(NULL);
 }
 
