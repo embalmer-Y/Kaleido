@@ -16,26 +16,29 @@
 
 static const char *TAG = "kaleido";
 
-void kaleido_apps_builtin_register(void);  /* kaleido_app 组件 */
+void kaleido_apps_builtin_register(void); /* kaleido_app 组件 */
 
 static void on_app_event(kapp_app_t *app, kapp_state_t from, kapp_state_t to)
 {
-    ESP_LOGI(TAG, "[app] %s: %d → %d", app->manifest.id, from, to);
+	ESP_LOGI(TAG, "[app] %s: %d → %d", app->manifest.id, from, to);
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Kaleido-Claw M0 boot (board=%s)", kaleido_board_caps()->name);
+	ESP_LOGI(TAG, "Kaleido-Claw M0 boot (board=%s)",
+		 kaleido_board_caps()->name);
 
-    kapp_set_event_listener(on_app_event);
-    kaleido_apps_builtin_register();
+	kapp_set_event_listener(on_app_event);
+	kaleido_apps_builtin_register();
 
-    /* 内置清单启动（M1 改为 KShell 网格懒加载） */
-    kapp_app_t *clock = kapp_find("com.kaleido.clock");
-    if (clock) kapp_transition(clock, KAPP_RUNNING);
+	/* 内置清单启动（M1 改为 KShell 网格懒加载） */
+	kapp_app_t *clock = kapp_find("com.kaleido.clock");
+	if (clock)
+		kapp_transition(clock, KAPP_RUNNING);
 
-    kapp_app_t *settings = kapp_find("com.kaleido.settings");
-    if (settings) kapp_transition(settings, KAPP_RUNNING);
+	kapp_app_t *settings = kapp_find("com.kaleido.settings");
+	if (settings)
+		kapp_transition(settings, KAPP_RUNNING);
 
-    ESP_LOGI(TAG, "registry: %u app(s) — M0 skeleton OK", kapp_count());
+	ESP_LOGI(TAG, "registry: %u app(s) — M0 skeleton OK", kapp_count());
 }

@@ -17,63 +17,63 @@ extern "C" {
 
 /* ---- 权限位图（8 类，架构 §2.3）---- */
 typedef enum {
-    KPERM_UI       = (1 << 0),  /* LVGL 画布/页面栈            */
-    KPERM_AUDIO_PLAY = (1 << 1),/* 播放队列                    */
-    KPERM_AUDIO_REC = (1 << 2), /* 录音（含唤醒接管）           */
-    KPERM_NET      = (1 << 3),  /* HTTP/WebSocket              */
-    KPERM_STORAGE  = (1 << 4),  /* App 沙箱目录                */
-    KPERM_SENSOR   = (1 << 5),  /* IMU/摄像头读                */
-    KPERM_ACCESSORY = (1 << 6), /* 扩展配件读写                */
-    KPERM_SYSTEM   = (1 << 7),  /* 系统信息/设置写             */
+	KPERM_UI = (1 << 0),         /* LVGL 画布/页面栈            */
+	KPERM_AUDIO_PLAY = (1 << 1), /* 播放队列                    */
+	KPERM_AUDIO_REC = (1 << 2),  /* 录音（含唤醒接管）           */
+	KPERM_NET = (1 << 3),        /* HTTP/WebSocket              */
+	KPERM_STORAGE = (1 << 4),    /* App 沙箱目录                */
+	KPERM_SENSOR = (1 << 5),     /* IMU/摄像头读                */
+	KPERM_ACCESSORY = (1 << 6),  /* 扩展配件读写                */
+	KPERM_SYSTEM = (1 << 7),     /* 系统信息/设置写             */
 } kperm_bit_t;
 
 #define KPERM_ALL (0xFFu)
 
 /* ---- 生命周期（架构 §2.4）---- */
 typedef enum {
-    KAPP_INSTALLED = 0,   /* 已登记，未加载                   */
-    KAPP_LOADED,          /* 资源就绪（Lua VM/资产）          */
-    KAPP_RUNNING,         /* 运行中（前台或后台）             */
-    KAPP_PAUSED,          /* 被暂停（LRU 或用户）            */
-    KAPP_DISABLED,        /* 崩溃≥2 次自动禁用（回滚保护）    */
+	KAPP_INSTALLED = 0, /* 已登记，未加载                   */
+	KAPP_LOADED,        /* 资源就绪（Lua VM/资产）          */
+	KAPP_RUNNING,       /* 运行中（前台或后台）             */
+	KAPP_PAUSED,        /* 被暂停（LRU 或用户）            */
+	KAPP_DISABLED,      /* 崩溃≥2 次自动禁用（回滚保护）    */
 } kapp_state_t;
 
 /* App 来源（无鉴权链，仅标记，UI 徽标呈现） */
 typedef enum {
-    KAPP_SRC_BUILTIN = 0, /* 出厂内置                        */
-    KAPP_SRC_CLAW,        /* Claw agent 生成                 */
-    KAPP_SRC_USB,         /* USB 侧载                        */
-    KAPP_SRC_WIFI,        /* WiFi 侧载                       */
+	KAPP_SRC_BUILTIN = 0, /* 出厂内置                        */
+	KAPP_SRC_CLAW,        /* Claw agent 生成                 */
+	KAPP_SRC_USB,         /* USB 侧载                        */
+	KAPP_SRC_WIFI,        /* WiFi 侧载                       */
 } kapp_source_t;
 
-#define KAPP_ID_MAX     64
-#define KAPP_NAME_MAX   48
-#define KAPP_VER_MAX    16
-#define KAPP_DESC_MAX  128
+#define KAPP_ID_MAX 64
+#define KAPP_NAME_MAX 48
+#define KAPP_VER_MAX 16
+#define KAPP_DESC_MAX 128
 
 /* ---- manifest（对应 manifest.json 字段，架构 §2.2）---- */
 typedef struct {
-    char     id[KAPP_ID_MAX];        /* com.kaleido.xxx 反域名      */
-    char     name[KAPP_NAME_MAX];
-    char     version[KAPP_VER_MAX];  /* semver 字符串               */
-    uint8_t  api;                    /* KApp API 版本，当前 =1      */
-    char     entry[64];              /* Lua: main.lua；内置: 填 "c" */
-    uint32_t permissions;            /* kperm_bit_t 位或            */
-    kapp_source_t source;
-    char     desc[KAPP_DESC_MAX];
+	char id[KAPP_ID_MAX]; /* com.kaleido.xxx 反域名      */
+	char name[KAPP_NAME_MAX];
+	char version[KAPP_VER_MAX]; /* semver 字符串               */
+	uint8_t api;                /* KApp API 版本，当前 =1      */
+	char entry[64];             /* Lua: main.lua；内置: 填 "c" */
+	uint32_t permissions;       /* kperm_bit_t 位或            */
+	kapp_source_t source;
+	char desc[KAPP_DESC_MAX];
 } kapp_manifest_t;
 
 /* ---- App 实现回调（内置 App 用 C；Lua App 由宿主适配器桥接）---- */
 typedef struct kapp_app {
-    kapp_manifest_t manifest;
-    kapp_state_t    state;
-    uint8_t         crash_count;
-    /* 生命周期回调，均可为 NULL（框架按需驱动） */
-    int (*on_load)(struct kapp_app *app);    /* INSTALLED→LOADED   */
-    int (*on_start)(struct kapp_app *app);   /* LOADED/PAUSED→RUNNING */
-    void (*on_pause)(struct kapp_app *app);  /* RUNNING→PAUSED     */
-    void (*on_stop)(struct kapp_app *app);   /* →INSTALLED（卸载前）*/
-    void *user_ctx;
+	kapp_manifest_t manifest;
+	kapp_state_t state;
+	uint8_t crash_count;
+	/* 生命周期回调，均可为 NULL（框架按需驱动） */
+	int (*on_load)(struct kapp_app *app);   /* INSTALLED→LOADED   */
+	int (*on_start)(struct kapp_app *app);  /* LOADED/PAUSED→RUNNING */
+	void (*on_pause)(struct kapp_app *app); /* RUNNING→PAUSED     */
+	void (*on_stop)(struct kapp_app *app);  /* →INSTALLED（卸载前）*/
+	void *user_ctx;
 } kapp_app_t;
 
 /* ---- API 版本 ---- */
@@ -104,7 +104,8 @@ int kapp_manifest_validate(const kapp_manifest_t *m);
  * 缺省字段容忍（entry/desc 可空），id/name/version 必填。
  * 返回 0 成功；-3 JSON 语法错误；-4 必填缺失；-5 api 版本不识别。
  */
-int kapp_manifest_parse_json(const char *json, size_t len, kapp_manifest_t *out);
+int kapp_manifest_parse_json(const char *json, size_t len,
+			     kapp_manifest_t *out);
 
 /* ---- 权限 ---- */
 
@@ -122,7 +123,8 @@ int kapp_transition(kapp_app_t *app, kapp_state_t target);
 int kapp_reenable(kapp_app_t *app);
 
 /** 生命周期事件钩子（审计/Toast，KShell 注册）。 */
-typedef void (*kapp_event_cb_t)(kapp_app_t *app, kapp_state_t from, kapp_state_t to);
+typedef void (*kapp_event_cb_t)(kapp_app_t *app, kapp_state_t from,
+				kapp_state_t to);
 void kapp_set_event_listener(kapp_event_cb_t cb);
 
 #ifdef __cplusplus
