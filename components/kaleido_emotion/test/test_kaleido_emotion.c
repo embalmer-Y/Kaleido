@@ -152,7 +152,7 @@ static void golden_social_bond(void)
 	TEST_ASSERT_TRUE(out.state.social_bond > 0.4f); /* 慢衰减 */
 }
 
-void app_main(void)
+void emotion_tests_main(void)
 {
 	UNITY_BEGIN();
 	RUN_TEST(test_lowpass_primitive);
