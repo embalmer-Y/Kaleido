@@ -176,6 +176,7 @@ out:
 struct ks_asr_sess {
 	char task_id[33];
 	esp_websocket_client_handle_t ws;
+	SemaphoreHandle_t connected;
 	SemaphoreHandle_t started;
 	SemaphoreHandle_t finished;
 	struct ks_asr_events ev;
@@ -194,6 +195,10 @@ static void asr_ws_event(void *arg, esp_event_base_t base, int32_t id,
 	char event[24] = "", sentence[512] = "", err[160] = "";
 	bool send_end = false;
 
+	if (id == WEBSOCKET_EVENT_CONNECTED) {
+		xSemaphoreGive(s_asr->connected);
+		return;
+	}
 	if (id != WEBSOCKET_EVENT_DATA || !e->data_ptr || !e->data_len)
 		return;
 	if (e->op_code != WS_TRANSPORT_OPCODES_TEXT)
@@ -238,6 +243,7 @@ int ks_asr_open(const struct ks_asr_cfg *cfg,
 	s_asr->ev = ev ? *ev :
 		    (struct ks_asr_events){ 0 };
 	task_id_gen(s_asr->task_id);
+	s_asr->connected = xSemaphoreCreateBinary();
 	s_asr->started = xSemaphoreCreateBinary();
 	s_asr->finished = xSemaphoreCreateBinary();
 
@@ -264,6 +270,10 @@ int ks_asr_open(const struct ks_asr_cfg *cfg,
 		s_asr->ws, WEBSOCKET_EVENT_ANY, asr_ws_event, NULL));
 	if (esp_websocket_client_start(s_asr->ws) != ESP_OK)
 		goto fail;
+	if (!xSemaphoreTake(s_asr->connected, pdMS_TO_TICKS(10000))) {
+		ESP_LOGE(TAG, "asr ws connect timeout");
+		goto fail;
+	}
 
 	run = run_task_build(s_asr->task_id, cfg->model, NULL,
 			     cfg->sample_rate);
@@ -353,6 +363,7 @@ void ks_asr_close(void)
 					   pdMS_TO_TICKS(2000));
 		esp_websocket_client_destroy(s_asr->ws);
 	}
+	vSemaphoreDelete(s_asr->connected);
 	vSemaphoreDelete(s_asr->started);
 	vSemaphoreDelete(s_asr->finished);
 	free(s_asr);
@@ -364,6 +375,7 @@ void ks_asr_close(void)
 struct ks_tts_sess {
 	char task_id[33];
 	esp_websocket_client_handle_t ws;
+	SemaphoreHandle_t connected;
 	SemaphoreHandle_t started;
 	SemaphoreHandle_t finished;
 	struct ks_tts_events ev;
@@ -382,6 +394,10 @@ static void tts_ws_event(void *arg, esp_event_base_t base, int32_t id,
 	char event[24] = "", sentence[8] = "", err[160] = "";
 	bool dummy = false;
 
+	if (id == WEBSOCKET_EVENT_CONNECTED) {
+		xSemaphoreGive(s_tts->connected);
+		return;
+	}
 	if (id != WEBSOCKET_EVENT_DATA || !e->data_ptr || !e->data_len)
 		return;
 	if (e->op_code == WS_TRANSPORT_OPCODES_BINARY) {
@@ -430,6 +446,7 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 		return -1;
 	s_tts->ev = ev ? *ev : (struct ks_tts_events){ 0 };
 	task_id_gen(s_tts->task_id);
+	s_tts->connected = xSemaphoreCreateBinary();
 	s_tts->started = xSemaphoreCreateBinary();
 	s_tts->finished = xSemaphoreCreateBinary();
 
@@ -455,6 +472,10 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 		s_tts->ws, WEBSOCKET_EVENT_ANY, tts_ws_event, NULL));
 	if (esp_websocket_client_start(s_tts->ws) != ESP_OK)
 		goto fail;
+	if (!xSemaphoreTake(s_tts->connected, pdMS_TO_TICKS(10000))) {
+		ESP_LOGE(TAG, "tts ws connect timeout");
+		goto fail;
+	}
 
 	run = run_task_build(s_tts->task_id, cfg->model, cfg->voice,
 			     cfg->sample_rate);
@@ -526,6 +547,7 @@ void ks_tts_close(void)
 					   pdMS_TO_TICKS(2000));
 		esp_websocket_client_destroy(s_tts->ws);
 	}
+	vSemaphoreDelete(s_tts->connected);
 	vSemaphoreDelete(s_tts->started);
 	vSemaphoreDelete(s_tts->finished);
 	free(s_tts);

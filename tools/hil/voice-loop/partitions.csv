@@ -1,0 +1,9 @@
+# Reference copy of the on-board Korvo-1 partition table (edge_agent layout).
+# soul-bench NEVER flashes bootloader/partition-table/NVS: only app -> ota_0 @0x20000.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0xA000,   0x6000,
+otadata,  data, ota,     0x10000,  0x2000,
+ota_0,    app,  ota_0,   0x20000,  0x500000,
+ota_1,    app,  ota_1,   0x520000, 0x500000,
+system,   data, 0x81,    0xA20000, 0x28A000,
+storage,  data, fat,     0xCAA000, 0x320000,
