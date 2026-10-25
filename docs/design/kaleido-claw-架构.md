@@ -12,7 +12,7 @@
 
 ## 0. 定位与设计原则
 
-Kaleido-Claw 是运行于 ESP32-S31 智能桌搭的**固件总架构**：以乐鑫 **ESP-Claw**（Apache-2.0，钉版 9b23c15）的 agent 框架为基座，融合 **Tessera** 的多 App 容器思想（简化鉴权），UI 自研。（2026-10-25：Muse Gadgets SDK 集成取消，原 Muse Link 层移除。）
+Kaleido-Claw 是运行于 **ESP32-P4+C5**（D-8 切换，2026-10-25；此前 ESP32-S31，见 git 历史）智能桌搭的**固件总架构**：以乐鑫 **ESP-Claw**（Apache-2.0，钉版 9b23c15）的 agent 框架为基座，融合 **Tessera** 的多 App 容器思想（简化鉴权），UI 自研。（2026-10-25：Muse Gadgets SDK 集成取消，原 Muse Link 层移除。）
 
 六条设计原则：
 
@@ -21,7 +21,7 @@ Kaleido-Claw 是运行于 ESP32-S31 智能桌搭的**固件总架构**：以乐�
 3. **P3 上游零侵入**：对 esp-claw 的扩展优先"包裹新组件"，不在 vendor 源文件原地修改（版权义务最小化，见 vendor-licenses R-1/义务 1）。
 4. **P4 后端可替换**：语音链路的 ASR/TTS/LLM 全部走云端 API 且供应商可配置（BYOK）；对话大脑唯一（Claw agent loop），角色/音色/情感为**同一大脑的外壳参数**而非并列后端。
 5. **P5 UI 质量对标消费电子**：设计 token 单源生成、PPA/JPEG 硬件加速默认路径、动效优先（直击 esp-claw"UI 丑"短板）。
-6. **P6 验证前移**：核心抽象（App 框架/音频焦点/配件协议）先在 Korvo-1 上跑通再上样机。
+6. **P6 验证前移**：核心抽象（App 框架/音频焦点/配件协议）先在开发板（osptek P4C5，D-8；原 Korvo-1 已判死 W-7）上跑通再上样机。
 
 ---
 
@@ -41,7 +41,7 @@ Kaleido-Claw 是运行于 ESP32-S31 智能桌搭的**固件总架构**：以乐�
 │  结构化记忆 · IM 会话 · **cap_app_mgr（对接 KApp 框架）** ·        │
 │  Lua 运行时(lua_modules 外设绑定，经 KApp 权限收窄)               │
 ├────────────────────────────────────────────────────────────────┤
-│  Kaleido BSP（kaleido_bsp：板级抽象，Korvo-1 与样机双实现）        │
+│  Kaleido BSP（kaleido_bsp：板级抽象，osptek P4C5 主线 + 样机双实现）    │
 │  音频子系统(PDM→AFE→I2S→TAS5805M, 全数字) · 显示(CO5300 QSPI)     │
 │  摄像头(DVP esp_video) · IMU/马达 · 电源/电池 · 存储(NAND/NVS)    │
 ├────────────────────────────────────────────────────────────────┤
