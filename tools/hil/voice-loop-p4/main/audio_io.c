@@ -51,6 +51,9 @@ int aio_init(void)
 
 	i2s_chan_config_t chan_cfg =
 		I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+	/* 欠载时 DMA 默认循环重发最后一个缓冲区（实测：语音末字无限复读、
+	 * 短音后持续蜂音）——必须开自动清零，欠载发静音 */
+	chan_cfg.auto_clear = true;
 	chan_cfg.dma_desc_num = 8;
 	chan_cfg.dma_frame_num = 320;
 	ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &s_tx, &s_rx));
