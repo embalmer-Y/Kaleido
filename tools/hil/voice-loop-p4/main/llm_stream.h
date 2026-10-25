@@ -21,6 +21,7 @@ struct llm_cfg {
 	const char *model;   /* qwen-plus                            */
 	const char *system;  /* 可为 NULL                            */
 	const char *user_msg;
+	bool cut_clauses;   /* true=子句级（，、）切送 TTS，首音更快 */
 };
 
 /* 阻塞执行一次流式对话；输出 first_token_us（首 delta 时刻，可 NULL） */

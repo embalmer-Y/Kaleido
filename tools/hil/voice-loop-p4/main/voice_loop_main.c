@@ -40,7 +40,8 @@ extern const char test_prompt_end[] asm("_binary_test_prompt_pcm_end");
 
 static char s_asr_text[512];
 static volatile int64_t t_capture_end, t_asr_final;
-static volatile int64_t t_llm_first, t_tts_first_pcm, t_first_audio;
+static volatile int64_t t_llm_first, t_llm_first_clause, t_tts_first_pcm,
+    t_first_audio;
 static volatile int s_round;
 
 /* ---- 播放通路：WS 回调(WS 任务) → StreamBuffer → 播放任务 → I2S ---- */
@@ -87,15 +88,31 @@ static void on_asr_text(void *user, const char *sentence, bool final)
 	strlcat(s_asr_text, sentence, sizeof(s_asr_text));
 }
 
-/* ---- LLM 句读回调：首句即送 TTS ---- */
+/* ---- LLM 句读回调：首句即送 TTS（TTS 已在采音窗内预开） ---- */
 
-static bool s_tts_open;
+static volatile bool s_tts_open;
+
+/* M1.5 杠杆：轮开始即后台开 TTS 会话，~2.8s 冷建连藏进采音窗 */
+static void tts_prewarm_task(void *arg)
+{
+	struct ks_tts_cfg *cfg = arg;
+
+	if (ks_tts_open(cfg, &(struct ks_tts_events){
+		    .on_pcm = on_tts_pcm }) == 0) {
+		s_tts_open = true;
+	} else {
+		ESP_LOGE(TAG, "tts prewarm fail");
+	}
+	vTaskDelete(NULL);
+}
 
 static bool on_llm_sentence(void *user, const char *sentence,
 			    bool final)
 {
-	struct ks_tts_cfg *cfg = user;
+	(void)user; /* TTS 已在采音窗内预开（M1.5），此处只管投喂 */
 
+	if (!t_llm_first_clause && sentence[0])
+		t_llm_first_clause = esp_timer_get_time();
 	if (final && !sentence[0]) {
 		if (s_tts_open) {
 			ks_tts_feed(NULL, true, 15000);
@@ -104,14 +121,12 @@ static bool on_llm_sentence(void *user, const char *sentence,
 		return true;
 	}
 	if (!s_tts_open) {
-		if (ks_tts_open(cfg,
-				&(struct ks_tts_events){
-					.on_pcm = on_tts_pcm }) != 0) {
-			ESP_LOGE(TAG, "tts open fail");
-			return false;
-		}
-		s_tts_open = true;
+		/* 预开通路径（M1.5）：asr_finish 后立即开好，此处无需再开 */
+		ESP_LOGE(TAG, "tts not prewarmed");
+		return false;
 	}
+	if (!sentence[0])
+		return true; /* 空子句防御：喂了会 task-failed */
 	int rc = ks_tts_feed(sentence, false, 15000);
 
 	if (rc)
@@ -405,7 +420,7 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	s_asr_text[0] = '\0';
 	s_tts_open = false;
 	t_capture_end = t_asr_final = 0;
-	t_llm_first = t_tts_first_pcm = t_first_audio = 0;
+	t_llm_first = t_llm_first_clause = t_tts_first_pcm = t_first_audio = 0;
 
 	xTaskCreatePinnedToCore(prompt_play_task, "pp", 4096, NULL, 6,
 				NULL, 0);
@@ -465,7 +480,13 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		return;
 	}
 
-	/* ④ LLM → TTS 外放；播放期同步采音 */
+	/* ④ LLM → TTS 外放（TTS 预开与 LLM 首句并行）；播放期同步采音 */
+	if (ks_tts_open(tts, &(struct ks_tts_events){
+			.on_pcm = on_tts_pcm }) == 0) {
+		s_tts_open = true;
+	} else {
+		ESP_LOGE(TAG, "tts prewarm fail");
+	}
 	t_listen_end = esp_timer_get_time() + 15000000;
 	xTaskCreatePinnedToCore(tts_listen_task, "tlisten", 4096,
 				&t_listen_end, 4, NULL, 0);
@@ -536,10 +557,14 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	static int16_t chunk[CAP_CHUNK];
 	int64_t t_trigger = esp_timer_get_time();
 
+	/* 轮隔离：等上一轮回复播完（≤20s），防残留音频污染本轮时间戳 */
+	for (int i = 0; i < 100 && xStreamBufferBytesAvailable(s_pb); i++)
+		vTaskDelay(pdMS_TO_TICKS(200));
+
 	s_asr_text[0] = '\0';
 	s_tts_open = false;                 /* G6：跨轮复位      */
 	t_capture_end = t_asr_final = 0;
-	t_llm_first = t_tts_first_pcm = t_first_audio = 0;
+	t_llm_first = t_llm_first_clause = t_tts_first_pcm = t_first_audio = 0;
 
 	printf("VL,ROUND,%d,speak now %ds\r\n", s_round, CAP_SECONDS);
 	printf("VL,HEAP,int=%uk,psram=%uk\r\n",
@@ -552,6 +577,8 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		ESP_LOGE(TAG, "asr open fail");
 		return -1;
 	}
+	xTaskCreatePinnedToCore(tts_prewarm_task, "ttspre", 6144, tts, 5,
+				NULL, 0);
 	/* 边采边喂（产品真实形态：流式）；embedded 模式以 1x 节奏
 	 * 喂内置测试 PCM（无人值守回归） */
 	int64_t cap_start = esp_timer_get_time();
@@ -621,12 +648,15 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	int64_t now = esp_timer_get_time();
 
 	printf("VL,RESULT,round=%d,fed_ms=%u,asr_final=%lld,"
-	       "llm_first=%lld,tts_first_pcm=%lld,first_audio=%lld,"
+	       "llm_first=%lld,clause=%lld,tts_first_pcm=%lld,"
+	       "first_audio=%lld,"
 	       "total_trigger_to_audio=%lld,total_capture_to_audio=%lld\r\n",
 	       s_round,
 	       (unsigned)(fed * 100 / 16000),
 	       (t_asr_final - t_capture_end) / 1000,
 	       t_llm_first / 1000,
+	       t_llm_first_clause ?
+		       (t_llm_first_clause - t_capture_end) / 1000 : -1,
 	       t_tts_first_pcm ? (t_tts_first_pcm -
 				  t_capture_end) / 1000 : -1,
 	       t_first_audio ? (t_first_audio - t_capture_end) / 1000 : -1,
@@ -661,6 +691,7 @@ void app_main(void)
 		.system = "你是桌搭小生物墨墨，口语化短句回答，每句不超过"
 			  "30个字。",
 		.user_msg = "",
+		.cut_clauses = true, /* M1.5：子句级切送，首音不等句号 */
 	};
 
 	esp_log_level_set("*", ESP_LOG_WARN);

@@ -22,6 +22,7 @@ struct llm_ctx {
 	size_t pend_len;
 	char sent[512];      /* 攒句缓冲                            */
 	size_t sent_len;
+	bool cut_clauses;   /* 子句级切送（，、）                  */
 	bool abort;
 	int status;
 };
@@ -33,6 +34,9 @@ static void emit(struct llm_ctx *c, const char *delta, size_t n)
 	static const unsigned char pun_q[3] = { 0xef, 0xbc, 0x9f };
 	static const unsigned char pun_e[3] = { 0xef, 0xbc, 0x81 };
 	static const unsigned char pun_s[3] = { 0xef, 0xbc, 0x9b };
+	/* M1.5：子句级切送（，、）——首音不等首个句号 */
+	static const unsigned char pun_c[3] = { 0xef, 0xbc, 0x8c };
+	static const unsigned char pun_d[3] = { 0xe3, 0x80, 0x81 };
 
 	for (size_t i = 0; i < n; i++) {
 		unsigned char ch = delta[i];
@@ -53,7 +57,9 @@ static void emit(struct llm_ctx *c, const char *delta, size_t n)
 			cut = !memcmp(t, pun_end, 3) ||
 			      !memcmp(t, pun_q, 3) ||
 			      !memcmp(t, pun_e, 3) ||
-			      !memcmp(t, pun_s, 3);
+			      !memcmp(t, pun_s, 3) ||
+			      (c->cut_clauses &&
+			       (!memcmp(t, pun_c, 3) || !memcmp(t, pun_d, 3)));
 		if (cut) {
 			c->sent[c->sent_len] = '\0';
 			if (!c->cb(c->user, c->sent, false))
@@ -159,7 +165,8 @@ static esp_err_t http_event(esp_http_client_event_t *ev)
 int llm_stream_chat(const struct llm_cfg *cfg, llm_sent_cb cb,
 		    void *user, int64_t *first_token_us)
 {
-	struct llm_ctx c = { .cb = cb, .user = user };
+	struct llm_ctx c = { .cb = cb, .user = user,
+			   .cut_clauses = cfg->cut_clauses };
 	char auth[192];
 	char body[1024];
 	int ret;
