@@ -11,6 +11,7 @@
 
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "driver/i2c_master.h"
 #include "esp_codec_dev.h"
@@ -124,10 +125,23 @@ int aio_init(void)
 		.bits_per_sample = 16,
 	};
 	esp_codec_dev_set_in_gain(s_in, 30.0); /* 硅麦；首验后标定 */
-	esp_codec_dev_set_out_vol(s_out, 55.0) /* 负责人听感：70 过大 */;
+	esp_codec_dev_set_out_vol(s_out, 60.0);
 	esp_codec_dev_open(s_in, &fs);
 	esp_codec_dev_open(s_out, &fs);
-	ESP_LOGI(TAG, "es8311 ready (adc+dac, 16k mono, pa=%d)", AIO_PA_PIN);
+	/* 实证补丁（V-38）：es8311 驱动对 pa_pin 的 gpio 配置在本板不生效
+	 *（疑似与启动期全脚 sleep 隔离配置冲突）——codec open 后手动重配
+	 * 该脚为推挽输出并拉高，'p'/'l' 探测两法均证实此路径出声 */
+	{
+		gpio_config_t g = {
+			.pin_bit_mask = 1ULL << AIO_PA_PIN,
+			.mode = GPIO_MODE_OUTPUT,
+		};
+
+		gpio_config(&g);
+		gpio_set_level(AIO_PA_PIN, 1);
+	}
+	ESP_LOGI(TAG, "es8311 ready (adc+dac, 16k stereo-slot, pa=%d forced)",
+		 AIO_PA_PIN);
 	return 0;
 }
 
