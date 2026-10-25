@@ -8,3 +8,4 @@ dependencies:
   lvgl/lvgl:
     version: 9.4.*
     public: true
+  espressif/thorvg: "^1.1.2"

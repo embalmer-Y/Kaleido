@@ -309,11 +309,14 @@ static void fps_scene_timer_cb(lv_timer_t *t)
 }
 
 static void fps_test(void);
+int lottie_bench_run(void);
 
 static void fps_auto_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(2000));
     fps_test();
+    /* V-35R：ThorVG/Lottie 离屏分档标定（pthread 内跑，W-6） */
+    lottie_bench_run();
     vTaskDelete(NULL);
 }
 
