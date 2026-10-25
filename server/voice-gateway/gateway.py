@@ -97,17 +97,24 @@ async def handle(dev):
         }})
     up_task = asyncio.create_task(pump_up(dev, upstream, tid))
     down_task = asyncio.create_task(pump_down(dev, upstream, tid))
+    # S5：任一泵结束（含干净返回）即收尾，避免对端悬置
     done, pending = await asyncio.wait(
-        [up_task, down_task], return_when=asyncio.FIRST_EXCEPTION)
+        [up_task, down_task], return_when=asyncio.FIRST_COMPLETED)
     for t in pending:
         t.cancel()
     await upstream.close()
+    await dev.close()
     print(f"[gw] session {task} tid={tid[:8]} done: "
           f"{[type(d.exception()).__name__ if d.exception() else 'ok' for d in done]}",
           file=sys.stderr)
 
 
 async def main():
+    if not TOKEN and os.environ.get("KALEIDO_GW_INSECURE") != "1":
+        print("[gw] refusing to start: GATEWAY_TOKEN empty "
+              "(set it, or KALEIDO_GW_INSECURE=1 for LAN tests)",
+              file=sys.stderr)
+        return
     async with websockets.serve(handle, "0.0.0.0", 9100,
                                 max_size=1 << 20):
         print("[gw] kaleido voice-gateway on :9100", file=sys.stderr)
