@@ -81,27 +81,28 @@ static void on_asr_text(void *user, const char *sentence, bool final)
 
 /* ---- LLM 句读回调：首句即送 TTS ---- */
 
+static bool s_tts_open;
+
 static bool on_llm_sentence(void *user, const char *sentence,
 			    bool final)
 {
-	static bool tts_open;
 	struct ks_tts_cfg *cfg = user;
 
 	if (final && !sentence[0]) {
-		if (tts_open) {
+		if (s_tts_open) {
 			ks_tts_feed(NULL, true, 15000);
-			tts_open = false;
+			s_tts_open = false;
 		}
 		return true;
 	}
-	if (!tts_open) {
+	if (!s_tts_open) {
 		if (ks_tts_open(cfg,
 				&(struct ks_tts_events){
 					.on_pcm = on_tts_pcm }) != 0) {
 			ESP_LOGE(TAG, "tts open fail");
 			return false;
 		}
-		tts_open = true;
+		s_tts_open = true;
 	}
 	int rc = ks_tts_feed(sentence, false, 15000);
 
@@ -109,7 +110,7 @@ static bool on_llm_sentence(void *user, const char *sentence,
 		return false;
 	if (final) {
 		ks_tts_feed(NULL, true, 15000);
-		tts_open = false;
+		s_tts_open = false;
 	}
 	return true;
 }
@@ -158,6 +159,7 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	int64_t t_trigger = esp_timer_get_time();
 
 	s_asr_text[0] = '\0';
+	s_tts_open = false;                 /* G6：跨轮复位      */
 	t_capture_end = t_asr_final = 0;
 	t_llm_first = t_tts_first_pcm = t_first_audio = 0;
 

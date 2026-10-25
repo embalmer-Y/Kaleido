@@ -9,7 +9,8 @@
  * 线程模型：回调在 provider 内部 WS 任务上下文执行——回调内禁止阻塞/重入
  * 本 API；PCM 消费方（如 I2S 写）须自带缓冲或投递。
  */
-#pragma once
+#ifndef KALEIDO_SPEECH_H
+#define KALEIDO_SPEECH_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -84,3 +85,4 @@ void ks_tts_close(void);
 #ifdef __cplusplus
 }
 #endif
+#endif /* KALEIDO_SPEECH_H */

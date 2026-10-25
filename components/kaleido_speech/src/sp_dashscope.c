@@ -199,6 +199,12 @@ static void asr_ws_event(void *arg, esp_event_base_t base, int32_t id,
 		xSemaphoreGive(s_asr->connected);
 		return;
 	}
+	if (id == WEBSOCKET_EVENT_DISCONNECTED) { /* G3：快失败 */
+		s_asr->failed = true;
+		xSemaphoreGive(s_asr->started);
+		xSemaphoreGive(s_asr->finished);
+		return;
+	}
 	if (id != WEBSOCKET_EVENT_DATA || !e->data_ptr || !e->data_len)
 		return;
 	if (e->op_code != WS_TRANSPORT_OPCODES_TEXT)
@@ -398,6 +404,12 @@ static void tts_ws_event(void *arg, esp_event_base_t base, int32_t id,
 		xSemaphoreGive(s_tts->connected);
 		return;
 	}
+	if (id == WEBSOCKET_EVENT_DISCONNECTED) { /* G3：快失败 */
+		s_tts->failed = true;
+		xSemaphoreGive(s_tts->started);
+		xSemaphoreGive(s_tts->finished);
+		return;
+	}
 	if (id != WEBSOCKET_EVENT_DATA || !e->data_ptr || !e->data_len)
 		return;
 	if (e->op_code == WS_TRANSPORT_OPCODES_BINARY) {
@@ -535,7 +547,9 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 
 int64_t ks_tts_first_pcm_us(void)
 {
-	return s_tts ? s_tts->first_pcm_us : 0;
+	if (!s_tts || !s_tts->first_pcm_us)
+		return -1;                  /* G4：与头文件一致     */
+	return s_tts->first_pcm_us;
 }
 
 void ks_tts_close(void)

@@ -56,8 +56,9 @@ uint64_t km_seq_current(void)
 	return s_seq;
 }
 
-static void ep_to_json(const struct km_episode *ep, char *out,
-		       size_t outsz)
+/* 返回序列化需写字节数（不含 NUL）；调用方据此拒超长（S1） */
+static size_t ep_to_json(const struct km_episode *ep, char *out,
+			 size_t outsz)
 {
 	cJSON *root = cJSON_CreateObject();
 	cJSON *facts = cJSON_CreateArray();
@@ -82,6 +83,7 @@ static void ep_to_json(const struct km_episode *ep, char *out,
 	strlcpy(out, s, outsz);
 	cJSON_free(s);
 	cJSON_Delete(root);
+	return strlen(s);
 }
 
 static bool ep_from_json(const char *line, struct km_episode *ep)
@@ -117,7 +119,9 @@ static bool ep_from_json(const char *line, struct km_episode *ep)
 		cJSON_ArrayForEach(it, v) {
 			if (i >= KM_FACTS_MAX)
 				break;
-			strlcpy(ep->facts[i++], it->valuestring, 48);
+			if (cJSON_IsString(it))     /* G8        */
+				strlcpy(ep->facts[i++],
+					it->valuestring, 48);
 		}
 	}
 	v = cJSON_GetObjectItem(root, "tags");
@@ -128,7 +132,9 @@ static bool ep_from_json(const char *line, struct km_episode *ep)
 		cJSON_ArrayForEach(it, v) {
 			if (i >= KM_TAGS_MAX)
 				break;
-			strlcpy(ep->tags[i++], it->valuestring, 12);
+			if (cJSON_IsString(it))     /* G8        */
+				strlcpy(ep->tags[i++],
+					it->valuestring, 12);
 		}
 	}
 	cJSON_Delete(root);
@@ -137,19 +143,24 @@ static bool ep_from_json(const char *line, struct km_episode *ep)
 
 int64_t km_append(const struct km_episode *ep)
 {
-	char line[KM_LINE_MAX];
+	char line[KM_LINE_MAX + 1];
 	struct km_episode e = *ep;
 	FILE *f;
+	size_t need;
 
-	e.seq = ++s_seq;
+	e.seq = s_seq + 1;               /* S1：写失败不前进      */
 	if (!e.t)
 		e.t = time(NULL);
-	ep_to_json(&e, line, sizeof(line));
+	need = ep_to_json(&e, line, sizeof(line));
+	if (need + 2 > KM_LINE_MAX) {
+		return -2;              /* 满配截断拒绝（S1）    */
+	}
 	f = fopen(s_path_ep, "a");
 	if (!f)
 		return -1;
 	fprintf(f, "%s\n", line);
 	fclose(f);
+	s_seq = e.seq;
 	return (int64_t)e.seq;
 }
 
@@ -181,18 +192,21 @@ static bool match_query(const struct km_episode *ep,
 			return false;   /* keyword 语义=过滤+加分     */
 		m += 0.2f;
 	}
-	*match_out = m;
+	*match_out = m > 0.2f ? 0.2f : m;  /* G7：加分上界 */
 	return true;
 }
 
 int km_query(const struct km_query *q, struct km_hit *hits, int top_n)
 {
-	FILE *f = fopen(s_path_ep, "r");
-	char line[KM_LINE_MAX];
+	FILE *f;
+	char line[KM_LINE_MAX + 1];
 	int n = 0;
 
-	if (!f || !q || !hits || top_n <= 0)
-		return f ? -1 : -2;
+	if (!q || !hits || top_n <= 0)      /* G9：先于 fopen      */
+		return -1;
+	f = fopen(s_path_ep, "r");
+	if (!f)
+		return -2;
 	while (fgets(line, sizeof(line), f)) {
 		struct km_episode ep;
 		float match;

@@ -21,6 +21,21 @@ static bool path_safe(const char *p)
 	return !strstr(p, "..");
 }
 
+/* S2：id 用作注册表目录名——白名单字符 + 禁路径形态 */
+static bool id_safe(const char *id)
+{
+	if (!id[0] || id[0] == '.' || !strcmp(id, ".") ||
+	    strstr(id, ".."))
+		return false;
+	for (const char *c = id; *c; c++)
+		if (!((*c >= 'A' && *c <= 'Z') ||
+		      (*c >= 'a' && *c <= 'z') ||
+		      (*c >= '0' && *c <= '9') ||
+		      *c == '.' || *c == '-' || *c == '_'))
+			return false;
+	return true;
+}
+
 static bool num_in(const cJSON *n, double lo, double hi)
 {
 	return cJSON_IsNumber(n) && n->valuedouble >= lo &&
@@ -53,9 +68,16 @@ int kp_parse(const char *json, size_t len, struct kp_persona *out,
 			*err_detail = "json";
 		return KP_E_PARSE;
 	}
+	REQ_STR(root, "schema_version", out->schema_ver); /* G11 */
 	REQ_STR(root, "id", out->id);
 	REQ_STR(root, "name", out->name);
 	REQ_STR(root, "version", out->version);
+	if (!id_safe(out->id)) {              /* S2            */
+		cJSON_Delete(root);
+		if (err_detail)
+			*err_detail = "id";
+		return KP_E_PATH;
+	}
 
 	v = cJSON_GetObjectItem(root, "character_card");
 	if (v) {
@@ -172,6 +194,20 @@ int kp_parse(const char *json, size_t len, struct kp_persona *out,
 			f = cJSON_GetObjectItem(tau, "dec");
 			if (num_in(f, 4.0, 256.0))
 				out->affect.tau_dec = (float)f->valuedouble;
+		}
+	}
+
+	{
+		bool has_neutral = false;
+
+		for (int i = 0; i < out->emotion_cnt; i++)
+			if (!strcmp(out->emotions[i].tag, "neutral"))
+				has_neutral = true;
+		if (out->emotion_cnt && !has_neutral) {  /* G11 */
+			cJSON_Delete(root);
+			if (err_detail)
+				*err_detail = "emotions.neutral";
+			return KP_E_FIELD;
 		}
 	}
 
@@ -295,9 +331,23 @@ int kp_install(const struct kp_persona *p)
 int kp_set_active(const char *id)
 {
 	cJSON *idx;
+	const cJSON *ids, *it;
+	bool found = false;
 
+	if (!id_safe(id))                       /* S2            */
+		return KP_E_PATH;
 	if (index_rw(&idx, false) < 0 || !idx)
 		return KP_E_NOTFOUND;
+	ids = cJSON_GetObjectItem(idx, "ids");  /* G11：须已注册 */
+	if (cJSON_IsArray(ids))
+		cJSON_ArrayForEach(it, ids)
+			if (cJSON_IsString(it) &&
+			    !strcmp(it->valuestring, id))
+				found = true;
+	if (!found) {
+		cJSON_Delete(idx);
+		return KP_E_NOTFOUND;
+	}
 	cJSON *a = cJSON_GetObjectItem(idx, "active");
 
 	if (!a)

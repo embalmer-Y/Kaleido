@@ -11,7 +11,8 @@
  *
  * 拍语义：1 拍 = 1Hz 调用一次 ke_step()；TTL/τ 均以拍计。
  */
-#pragma once
+#ifndef KALEIDO_EMOTION_H
+#define KALEIDO_EMOTION_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -37,11 +38,18 @@ struct ke_state {
 
 /* ---- 每拍输入（全部 [0,1]，驱力误差类单侧 ≥0；缺省语义=保持）---- */
 
+/* 执行回执三态（G1：无事件拍保持 controllability） */
+enum ke_receipt {
+	KE_RECEIPT_NONE = 0,
+	KE_RECEIPT_SUCCESS,
+	KE_RECEIPT_FAIL,
+};
+
 struct ke_inputs {
 	bool have_drive;         /* 驱力误差输入是否有效            */
 	float drive_error_mean;  /* Σw·e_d / n（L05 E 项）          */
 	float drive_error_max;   /* max e_d（arousal/urgency 源）    */
-	bool action_receipt_success; /* 执行回执（→controllability） */
+	enum ke_receipt receipt; /* 执行回执（→controllability）    */
 	float sensory_residual_mean; /* 感觉预测误差 → novelty       */
 	float belief_uncertainty_mean; /* 1−p_max → uncertainty     */
 	bool social_event;       /* 本拍发生真实互动（→social_bond） */
@@ -88,3 +96,4 @@ bool ke_hysteresis(bool on, float x, float band);
 #ifdef __cplusplus
 }
 #endif
+#endif /* KALEIDO_EMOTION_H */

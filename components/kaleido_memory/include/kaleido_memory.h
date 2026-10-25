@@ -12,7 +12,8 @@
  * 存储：littlefs/-fatfs 之上的 POSIX 文件 API（路径由 km_init 给出），
  * 追加写 + 显式 flush；无动态分配大块（逐行缓冲 ≤ KM_LINE_MAX）。
  */
-#pragma once
+#ifndef KALEIDO_MEMORY_H
+#define KALEIDO_MEMORY_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -69,3 +70,4 @@ int km_backup(const char *backup_path);
 #ifdef __cplusplus
 }
 #endif
+#endif /* KALEIDO_MEMORY_H */

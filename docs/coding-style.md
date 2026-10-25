@@ -87,3 +87,12 @@
 - M0 已有代码（kaleido_app 等）已于 2026-10-25 完成一次性内核风格迁移（纯格式化提交，构建回归通过）；
 - HIL 测试工程（tools/hil/）同规范执行；
 - 后续新组件（kaleido_audio/kaleido_ui/…）自第一行起遵守。
+
+## 附：组件级前缀裁定（2026-10-25，响应组件评审）
+
+内核惯例是按子系统取短前缀。Kaleido 各组件采用组件级前缀：
+`ks_`(speech) `ke_`(emotion) `ki_`(ignition) `km_`(memory) `kp_`(persona)
+`kapp_`(app) —— 与内核 `dev_`/`clk_` 同构，**修订规范：组件级短前缀合规**；
+`kd_` 保留给 BSP。头文件守卫一律 `#ifndef`（本批已全量转换）。
+80 列口径：代码与注释按显示宽（CJK=2）计，存量超宽随 clang-format
+批处理收敛（登记后续项）。

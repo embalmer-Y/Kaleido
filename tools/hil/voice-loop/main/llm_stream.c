@@ -42,7 +42,7 @@ static void emit(struct llm_ctx *c, const char *delta, size_t n)
 			if (!c->cb(c->user, c->sent, false))
 				c->abort = true;
 			c->sent_len = 0;
-			continue;
+			/* G5：flush 后当前字节照常入缓冲        */
 		}
 		c->sent[c->sent_len++] = ch;
 		bool cut = (ch == '\n');

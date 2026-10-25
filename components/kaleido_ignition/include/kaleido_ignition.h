@@ -9,7 +9,8 @@
  *  - 日志透明：decision 携带全因子与门状态（供 /ignite 云裁决 prompt）
  * 方案 B（Pareto 仲裁/慢环）演进时本组件降级为因子供给器。
  */
-#pragma once
+#ifndef KALEIDO_IGNITION_H
+#define KALEIDO_IGNITION_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -79,3 +80,4 @@ uint16_t ki_cooldown_current(void);
 #ifdef __cplusplus
 }
 #endif
+#endif /* KALEIDO_IGNITION_H */

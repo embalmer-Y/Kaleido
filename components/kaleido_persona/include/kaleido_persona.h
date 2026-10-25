@@ -7,7 +7,8 @@
  *    无兜底音色拒装（25号 §2.4）；资产路径禁绝对路径与 ".."
  *  - 注册表：文件型索引（index.json），全局至多一个激活角色
  */
-#pragma once
+#ifndef KALEIDO_PERSONA_H
+#define KALEIDO_PERSONA_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -49,6 +50,7 @@ struct kp_ignition {
 };
 
 struct kp_persona {
+	char schema_ver[8];              /* "1"                    */
 	char id[KP_ID_MAX];
 	char name[KP_NAME_MAX];
 	char version[KP_VER_MAX];
@@ -83,9 +85,10 @@ int kp_parse(const char *json, size_t len, struct kp_persona *out,
 int kp_registry_init(const char *registry_dir);
 int kp_install(const struct kp_persona *p);       /* 按 id 去重 */
 int kp_set_active(const char *id);
-int kp_active(struct kp_persona *out);            /* 0=有激活   */
+int kp_active(struct kp_persona *out);            /* 1=成功/0=无激活 */
 int kp_count(void);
 
 #ifdef __cplusplus
 }
 #endif
+#endif /* KALEIDO_PERSONA_H */
