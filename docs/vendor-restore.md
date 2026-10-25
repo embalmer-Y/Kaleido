@@ -19,6 +19,7 @@ cd esp-claw && git checkout 9b23c15bc28703369b4b7fad3e810f8cb535fb59
 cd ..
 
 # 2) muse-gadget-sdk：钉版 c9354b7（未打补丁）
+# 【已移除 2026-10-25，决策 D-6】目录已删除；如将来重启评估按此恢复：
 git clone https://github.com/facebookincubator/muse-gadget-sdk.git
 cd muse-gadget-sdk && git checkout c9354b7a765cfb7dd3c4f1945a9ca838d871630c
 ```

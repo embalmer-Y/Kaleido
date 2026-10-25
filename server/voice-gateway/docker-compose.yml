@@ -1,0 +1,9 @@
+services:
+  voice-gateway:
+    build: .
+    ports:
+      - "9100:9100"
+    environment:
+      - DS_API_KEY=${DS_API_KEY}
+      - GATEWAY_TOKEN=${GATEWAY_TOKEN}
+    restart: unless-stopped

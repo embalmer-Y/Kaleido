@@ -11,3 +11,4 @@
 *.log
 *.swp
 .DS_Store
+server/voice-gateway/gw.log
