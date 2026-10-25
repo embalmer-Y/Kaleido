@@ -17,12 +17,14 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_lcd_mipi_dsi.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "thorvg_capi.h"
 
+extern esp_lcd_panel_handle_t lcd_panel;
 extern const char test_lottie_json_start[] asm("_binary_test_lottie_json_start");
 extern const char test_lottie_json_end[] asm("_binary_test_lottie_json_end");
 
@@ -41,6 +43,7 @@ static volatile int s_ready_idx = -1;
 static volatile int s_disp_idx;
 static lv_obj_t *s_img;	/* lv_canvas：合成走官方播放器验证路径 */
 static lv_timer_t *s_stage_timer;
+static volatile int s_frozen;
 static volatile int s_render_cnt;
 static volatile int s_disp_cnt;
 static volatile int s_adopted;	/* 当前展示的缓冲下标 */
@@ -91,7 +94,14 @@ static void *stage_pthread(void *arg)
 	fflush(stdout);
 
 	int frame = 0;
+	int64_t loop_t0 = esp_timer_get_time();
+	int skips = 0, loops = 0;
+	int64_t loop_sum = 0;
 	for (;;) {
+		if (s_frozen) {
+			vTaskDelay(pdMS_TO_TICKS(50));
+			continue;
+		}
 		int64_t t0 = esp_timer_get_time();
 		int back = -1;
 
@@ -101,6 +111,9 @@ static void *stage_pthread(void *arg)
 				break;
 			}
 		}
+		loops++;
+		if (back < 0)
+			skips++;
 		if (back >= 0) {
 			memset(s_buf[back], 0, STAGE_W * STAGE_H * 4);
 			tvg_swcanvas_set_target(canvas, s_buf[back], STAGE_W,
@@ -122,11 +135,17 @@ static void *stage_pthread(void *arg)
 
 				s_sum += esp_timer_get_time() - t0;
 				if (++s_n % 30 == 0) {
-					printf("DSI,STAGE,RENDER_MS,avg=%.1f\r\n",
-					       (double)s_sum / s_n / 1000.0);
+					int64_t now = esp_timer_get_time();
+
+					printf("DSI,STAGE,RENDER_MS,avg=%.1f,skip=%d/%d,loop_ms=%.1f\r\n",
+					       (double)s_sum / s_n / 1000.0, skips, loops,
+					       (double)(now - loop_t0) / loops / 1000.0);
 					fflush(stdout);
 					s_n = 0;
 					s_sum = 0;
+					skips = 0;
+					loops = 0;
+					loop_t0 = now;
 				}
 			}
 		}
@@ -143,7 +162,18 @@ static void *stage_pthread(void *arg)
 static void stage_timer_cb(lv_timer_t *t)
 {
 	static int sec;
+	static int64_t last_cb;
+	static int64_t cb_sum, cb_max;
+	int64_t now = esp_timer_get_time();
 
+	if (last_cb) {
+		int64_t d = now - last_cb;
+
+		cb_sum += d;
+		if (d > cb_max)
+			cb_max = d;
+	}
+	last_cb = now;
 	s_disp_cnt++;
 
 	/* LVGL 任务内采纳最新就绪帧：指针切换只发生在 LVGL 上下文 */
@@ -158,12 +188,56 @@ static void stage_timer_cb(lv_timer_t *t)
 	}
 
 	if (++sec % 30 == 0) {
-		printf("DSI,STAGE,STAT,render=%d,disp=%d\r\n", s_render_cnt,
-		       s_disp_cnt);
+		printf("DSI,STAGE,STAT,render=%d,disp=%d,cb_ms=%.1f/%.1f\r\n",
+		       s_render_cnt, s_disp_cnt,
+		       (double)cb_sum / 30 / 1000.0, (double)cb_max / 1000.0);
 		fflush(stdout);
 		s_render_cnt = 0;
 		s_disp_cnt = 0;
+		cb_sum = 0;
+		cb_max = 0;
 	}
+}
+
+static void stage_dump_probe(void)
+{
+	void *fbs[2] = {0};
+
+	if (!lcd_panel ||
+	    esp_lcd_dpi_panel_get_frame_buffer(lcd_panel, 2, &fbs[0],
+					       &fbs[1]) != ESP_OK)
+		return;
+	static const int rows[] = { 300, 600, 680, 760 };
+
+	for (unsigned r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
+		int y = rows[r];
+
+		for (int fb = 0; fb < 2; fb++) {
+			uint16_t *a = fbs[fb];
+
+			printf("DSI,STAGE,DUMP,fb=%d,y=%d:", fb, y);
+			for (int x = 440; x < 600; x += 8)
+				printf("%04X ", a[y * 800 + x]);
+			printf("\r\n");
+		}
+	}
+	fflush(stdout);
+}
+
+static void stage_console_task(void *arg)
+{
+	int c;
+
+	while ((c = getchar()) != EOF) {
+		if (c == 'f') {
+			s_frozen = !s_frozen;
+			printf("DSI,STAGE,FROZEN,%d\r\n", s_frozen);
+			fflush(stdout);
+		} else if (c == 'd') {
+			stage_dump_probe();
+		}
+	}
+	vTaskDelete(NULL);
 }
 
 int lottie_stage_start(void)
@@ -208,5 +282,7 @@ int lottie_stage_start(void)
 		return -1;
 	}
 	pthread_detach(th);
+
+	xTaskCreate(stage_console_task, "stage_cmd", 4096, NULL, 5, NULL);
 	return 0;
 }

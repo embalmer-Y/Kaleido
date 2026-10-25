@@ -42,7 +42,7 @@
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL 1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
 #define EXAMPLE_PIN_NUM_BK_LIGHT 20
-#define EXAMPLE_PIN_NUM_LCD_RST  -1
+#define EXAMPLE_PIN_NUM_LCD_RST  5  /* P4C5: LCD_RST=GPIO5，热重启硬复位面板 */
 
 /* Touch settings */
 #define EXAMPLE_TOUCH_I2C_NUM       (0)
@@ -57,7 +57,8 @@
 static const char *TAG = "EXAMPLE";
 
 /* LCD IO and panel */
-static esp_lcd_panel_handle_t lcd_panel = NULL;
+/* stage 差异诊断需要读取 DPI fb 指针 */
+esp_lcd_panel_handle_t lcd_panel = NULL;
 static esp_lcd_panel_io_handle_t io_handle = NULL;
 static esp_lcd_touch_handle_t touch_handle = NULL;
 
