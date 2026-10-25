@@ -4,6 +4,7 @@
 |---|---|---|---|
 | v0.1 | 2026-10-23 | 初稿 | ZCode（受项目负责人全权委托起草） |
 | v0.2 | 2026-10-24 | 登记负责人四项决策：弃用 xiaozhi（软件走 Kaleido-Claw：esp-claw 基座+Tessera 多 App+Muse SDK）；形态改智能桌搭；扩展位定为顶部+底部双位；验证采购改由负责人直接执行（§12.2 审批对自购豁免）。R1-R6 红线不变 | ZCode |
+| v0.3 | 2026-10-25 | 编码规范升级：C 代码统一 **Linux 内核风格**（负责人指示）。§6.3 重写，详见 kaleido-fw/docs/coding-style.md | ZCode |
 
 **文档地位**：本文件是 Kaleido 项目所有开发活动的最高规范，优先级高于任何个人偏好与口头约定。
 `start.md` 定义"做什么"，本文件定义"怎么做、做到什么程度才算完成"。两者冲突时，以修订时间较新者为准。
@@ -170,12 +171,14 @@ kaleido-fw/
   main/  tools/  test/  docs/
 ```
 
-### 6.3 编码规范
+### 6.3 编码规范（v0.3 起执行 Linux 内核风格）
 
-- `.clang-format` 入库并由 CI 强制执行。
-- 命名：类型/函数/变量 snake_case，宏 UPPER_CASE，模块统一前缀（如 `kd_audio_*`）。
-- 禁止 magic number；硬件参数集中到板级配置头文件（`board.h`）。
-- 组件对外只暴露头文件中的公开 API，内部实现不外泄。
+- **C 代码统一 Linux 内核风格**：完整规范与 ESP-IDF 适配豁免见 `kaleido-fw/docs/coding-style.md`（事实源）；
+  仓库根 `.clang-format`（内核预设）由 CI 强制执行。
+- 核心要点：Tab 缩进（宽度 8）、80 列上限、函数左花括号换行/其余同行、`/* */` 注释（禁 `//`）、
+  snake_case 命名+模块前缀（`kd_audio_*`）、宏 UPPER_CASE、**新代码禁新增 typedef**、
+  单出口 goto 错误清理模式。
+- 既有公共 API 的 `_t` typedef 保留兼容（豁免清单见 coding-style.md），逐步消除。
 
 ### 6.4 Git 与评审
 
