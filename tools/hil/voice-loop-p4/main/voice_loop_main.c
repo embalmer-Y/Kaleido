@@ -6,11 +6,13 @@
  *       compatible-mode SSE（句读回调）→ TTS（预开连接）→ I2S 播放。
  * 所有时间戳 esp_timer；输出 "VL,RESULT,…" 单行供统计。
  */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "audio_io.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -113,6 +115,232 @@ static bool on_llm_sentence(void *user, const char *sentence,
 		s_tts_open = false;
 	}
 	return true;
+}
+
+/* ---- 声学环回自检（负责人提议：板载喇叭发声、麦克风采回验证） ----
+ *
+ * 'l'：1kHz 正弦环回（噪声底/信噪比/谱峰量化声学链）
+ * 'a'：内置语音喇叭外放 → 麦克风采回 → ASR（真实语音过空气的端到端证明）
+ *      → LLM → TTS 外放（播放期同步采音证明出声）
+ */
+
+static int rms_i16(const int16_t *p, size_t n)
+{
+	int64_t acc = 0;
+
+	for (size_t i = 0; i < n; i++)
+		acc += (int64_t)p[i] * p[i];
+	return (int)sqrt((double)acc / (n ? n : 1));
+}
+
+static float goertzel(const int16_t *x, size_t n, float freq, float sr)
+{
+	size_t k = (size_t)(n * freq / sr + 0.5f);
+	float w = 2.0f * (float)M_PI * (float)k / (float)n;
+	float coeff = 2.0f * cosf(w);
+	float s1 = 0.0f, s2 = 0.0f;
+
+	for (size_t i = 0; i < n; i++) {
+		float s0 = (float)x[i] + coeff * s1 - s2;
+
+		s2 = s1;
+		s1 = s0;
+	}
+	return sqrtf(s1 * s1 + s2 * s2 - coeff * s1 * s2);
+}
+
+static void tone_play_task(void *arg)
+{
+	aio_play(arg, 16000, 3000);
+	vTaskDelete(NULL);
+}
+
+static void loopback_tone(void)
+{
+	static int16_t silence[16000];
+	static int16_t capbuf[16000];
+	static int16_t tone[16000];
+
+	for (size_t i = 0; i < 16000; i++)
+		tone[i] = (int16_t)(10000.0f *
+				    sinf(2.0f * (float)M_PI * 1000.0f *
+					 (float)i / 16000.0f));
+
+	int n_noise = aio_capture(silence, 16000, 2000);
+
+	if (n_noise != 16000) {
+		printf("VL,L,FAIL,capture_noise=%d\r\n", n_noise);
+		fflush(stdout);
+		return;
+	}
+	int rms_noise = rms_i16(silence, 16000);
+
+	xTaskCreatePinnedToCore(tone_play_task, "tone", 4096, tone, 6,
+				NULL, 0);
+	int n_sig = aio_capture(capbuf, 16000, 3000);
+
+	if (n_sig != 16000) {
+		printf("VL,L,FAIL,capture_sig=%d\r\n", n_sig);
+		fflush(stdout);
+		return;
+	}
+	int rms_sig = rms_i16(capbuf, 16000);
+	float bin = goertzel(capbuf, 16000, 1000.0f, 16000.0f);
+	float bin_lo = goertzel(capbuf, 16000, 940.0f, 16000.0f);
+	float bin_hi = goertzel(capbuf, 16000, 1060.0f, 16000.0f);
+	float snr = 20.0f *
+	    log10f(((float)rms_sig + 1.0f) / ((float)rms_noise + 1.0f));
+
+	printf("VL,L,RESULT,noise_rms=%d,sig_rms=%d,snr_db=%.1f,"
+	       "g1000=%.0f,g940=%.0f,g1060=%.0f,verdict=%s\r\n",
+	       rms_noise, rms_sig, (double)snr, (double)bin,
+	       (double)bin_lo, (double)bin_hi,
+	       (snr > 10.0f && bin > bin_lo * 4.0f &&
+		bin > bin_hi * 4.0f) ? "PASS" : "FAIL");
+	fflush(stdout);
+}
+
+/* 喇叭外放内置语音 + 同步采音 */
+static void prompt_play_task(void *arg)
+{
+	const int16_t *p = (const void *)test_prompt_start;
+	size_t total = (test_prompt_end - test_prompt_start) / 2;
+
+	aio_play(p, total, 5000);
+	vTaskDelete(NULL);
+}
+
+/* TTS 播放期采音：每秒报 RMS，证明出声 */
+static void tts_listen_task(void *arg)
+{
+	static int16_t win[16000];
+	int64_t *t_end = arg;
+
+	while (esp_timer_get_time() < *t_end) {
+		int n = aio_capture(win, 16000, 1500);
+
+		if (n <= 0)
+			break;
+		printf("VL,A,TTS_RMS,%d\r\n", rms_i16(win, n));
+		fflush(stdout);
+	}
+	vTaskDelete(NULL);
+}
+
+static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
+			   struct llm_cfg *llm)
+{
+	size_t total = (test_prompt_end - test_prompt_start) / 2;
+	int16_t *cap = heap_caps_malloc(total * 2, MALLOC_CAP_SPIRAM);
+	static int16_t chunk[CAP_CHUNK];
+	int64_t t_listen_end;
+
+	if (!cap) {
+		printf("VL,A,FAIL,oom\r\n");
+		fflush(stdout);
+		return;
+	}
+	printf("VL,A,ROUND,speaker plays prompt %us, mic listens\r\n",
+	       (unsigned)(total / 16000));
+	fflush(stdout);
+
+	/* ① 静默底噪（1s） */
+	static int16_t noise[16000];
+	int rms_noise = 0;
+
+	if (aio_capture(noise, 16000, 2000) == 16000)
+		rms_noise = rms_i16(noise, 16000);
+
+	/* ② 外放 + 同步采回 */
+	s_asr_text[0] = '\0';
+	s_tts_open = false;
+	t_capture_end = t_asr_final = 0;
+	t_llm_first = t_tts_first_pcm = t_first_audio = 0;
+
+	xTaskCreatePinnedToCore(prompt_play_task, "pp", 4096, NULL, 6,
+				NULL, 0);
+	size_t got = 0;
+
+	while (got < total) {
+		int n = aio_capture(chunk, CAP_CHUNK, 1000);
+
+		if (n <= 0)
+			break;
+		memcpy(cap + got, chunk, n * 2);
+		got += n;
+	}
+	/* 播放与采集同钟：采满 total 即放完；再等 DMA 尾部排空 */
+	vTaskDelay(pdMS_TO_TICKS(300));
+	t_capture_end = esp_timer_get_time();
+	int rms_play = got ? rms_i16(cap, got) : 0;
+
+	printf("VL,A,ACOUSTIC,noise_rms=%d,played_rms=%d,got=%u/%u,"
+	       "air_snr_db=%.1f\r\n",
+	       rms_noise, rms_play, (unsigned)got, (unsigned)total,
+	       (double)(20.0f * log10f(((float)rms_play + 1.0f) /
+				       ((float)rms_noise + 1.0f))));
+	fflush(stdout);
+
+	/* ③ 采回的音频送 ASR（喇叭→空气→麦→云端 的语音级证明） */
+	if (ks_asr_open(asr, &(struct ks_asr_events){
+			.on_text = on_asr_text }) != 0) {
+		printf("VL,A,FAIL,asr_open\r\n");
+		fflush(stdout);
+		free(cap);
+		return;
+	}
+	for (size_t off = 0; off < got; off += CAP_CHUNK) {
+		size_t n = got - off;
+
+		if (n > CAP_CHUNK)
+			n = CAP_CHUNK;
+		if (ks_asr_feed(cap + off, n) < 0)
+			break;
+		/* 快喂（采音频已完整，无需 1x 节奏） */
+	}
+	if (ks_asr_finish(15000) != 0) {
+		printf("VL,A,FAIL,asr_finish\r\n");
+		fflush(stdout);
+		ks_asr_close();
+		free(cap);
+		return;
+	}
+	t_asr_final = esp_timer_get_time();
+	ks_asr_close();
+	printf("VL,A,ASR_ECHO,%s\r\n",
+	       s_asr_text[0] ? s_asr_text : "(empty)");
+	fflush(stdout);
+	if (!s_asr_text[0]) {
+		free(cap);
+		return;
+	}
+
+	/* ④ LLM → TTS 外放；播放期同步采音 */
+	t_listen_end = esp_timer_get_time() + 15000000;
+	xTaskCreatePinnedToCore(tts_listen_task, "tlisten", 4096,
+				&t_listen_end, 4, NULL, 0);
+	llm->user_msg = s_asr_text;
+	int64_t ftok = 0;
+	int rc = llm_stream_chat(llm, on_llm_sentence, tts, &ftok);
+
+	t_llm_first = ftok;
+	ks_tts_close();
+	free(cap);
+	if (rc != 0) {
+		printf("VL,A,FAIL,llm=%d\r\n", rc);
+		fflush(stdout);
+		return;
+	}
+	vTaskDelay(pdMS_TO_TICKS(500));
+	printf("VL,A,RESULT,asr_final=%lld,llm_first=%lld,"
+	       "tts_first_pcm=%lld,first_audio=%lld,"
+	       "capture_to_audio=%lld\r\n",
+	       (t_asr_final - t_capture_end) / 1000,
+	       t_llm_first / 1000,
+	       t_tts_first_pcm ? (t_tts_first_pcm - t_capture_end) / 1000 : -1,
+	       t_first_audio ? (t_first_audio - t_capture_end) / 1000 : -1,
+	       t_first_audio ? (t_first_audio - t_capture_end) / 1000 : -1);
+	fflush(stdout);
 }
 
 /* ---- WiFi（M1 已验证路径，最简 station） ---- */
@@ -287,6 +515,14 @@ void app_main(void)
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
 
+		if (ch == 'l' || ch == 'L') {
+			loopback_tone();
+			continue;
+		}
+		if (ch == 'a' || ch == 'A') {
+			acoustic_round(&asr, &tts, &llm);
+			continue;
+		}
 		if (ch != 'g' && ch != 'G' && ch != 't' && ch != 'T')
 			continue;
 		bool embedded = (ch == 't' || ch == 'T');
