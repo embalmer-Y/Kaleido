@@ -6,6 +6,7 @@
  */
 
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "driver/i2c_master.h"
@@ -125,7 +126,7 @@ static esp_err_t app_lcd_init(void)
         .dpi_clock_freq_mhz = 76,                             \
         .virtual_channel = 0,                                 \
         .in_color_format = MIPI_DPI_PX_FORMAT,                \
-        .num_fbs = 1,                                         \
+        .num_fbs = 2,                                         \
         .video_timing = {                                     \
             .h_size = EXAMPLE_LCD_H_RES,                      \
             .v_size = EXAMPLE_LCD_V_RES,                      \
@@ -215,7 +216,7 @@ static esp_err_t app_lvgl_init(void)
     /* Initialize LVGL */
     const lvgl_port_cfg_t lvgl_cfg = {
         .task_priority = 4,         /* LVGL task priority */
-        .task_stack = 4096*2,         /* LVGL 任务堆栈大小*/
+        .task_stack = 4096*4,         /* LVGL 任务堆栈大小*/
         .task_affinity = -1,        /* LVGL task pinned to core (-1 is no affinity) */
         .task_max_sleep_ms = 500,   /* Maximum sleep in LVGL task */
         .timer_period_ms = 5        /* LVGL timer tick period in ms */
@@ -241,16 +242,19 @@ static esp_err_t app_lvgl_init(void)
         .flags = {
             .buff_dma = false,
             .buff_spiram = true,
-            .sw_rotate = true,// true：软件；false：硬件
+            .sw_rotate = true,
             .swap_bytes = false,
             .full_refresh = false,
-            .direct_mode = false,
+            /* 直接模式 + 防撕裂：LVGL 画进 DPI 自身帧缓冲，
+             * 换帧与 vsync 对齐（port 仅在 avoid_tearing 时做 fb 映射，
+             * 且必须搭配 direct_mode，否则 flush 死等信号量） */
+            .direct_mode = true,
         }
     };
 
     const lvgl_port_display_dsi_cfg_t dpi_cfg = {
         .flags = {
-            .avoid_tearing = false,
+            .avoid_tearing = true,
         }
     };
 
@@ -266,6 +270,101 @@ static esp_err_t app_lvgl_init(void)
     return ESP_OK;
 }
 
+/* 'f'：自建 FPS 基准（benchmark 汇总表渲染崩溃，改用 REFR_READY 计数） */
+static volatile int s_refr_cnt;
+static lv_obj_t *s_fps_label;
+static lv_obj_t *s_fps_arc, *s_fps_bar;
+
+static void refr_cb(lv_event_t *e)
+{
+    s_refr_cnt++;
+}
+
+static volatile int s_tmr_cnt;
+
+static void fps_scene_timer_cb(lv_timer_t *t)
+{
+    s_tmr_cnt++;
+    /* 模拟对话 UI 负载：跳动数值 + 移动弧 + 变色条 */
+    static int step;
+    lv_obj_t *arc = s_fps_arc;
+    lv_obj_t *bar = s_fps_bar;
+
+    step++;
+    if (arc)
+        lv_arc_set_value(arc, 30 + (step * 7) % 140);
+    if (bar) {
+        lv_obj_set_x(bar, 50 + (step * 13) % 600);
+        if (step % 50 == 0) {
+            static const lv_palette_t pals[] = {
+                LV_PALETTE_RED, LV_PALETTE_BLUE, LV_PALETTE_GREEN,
+                LV_PALETTE_ORANGE, LV_PALETTE_PURPLE
+            };
+            lv_obj_set_style_bg_color(bar,
+                lv_palette_main(pals[(step / 50) % 5]), 0);
+        }
+    }
+    if (s_fps_label)
+        lv_label_set_text_fmt(s_fps_label, "step %d", step);
+}
+
+static void fps_test(void);
+
+static void fps_auto_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    fps_test();
+    vTaskDelete(NULL);
+}
+
+static void fps_test(void)
+{
+    int64_t t_lk0 = esp_timer_get_time();
+    bool lk = lvgl_port_lock(10000);
+
+    printf("DSI,FPS,lock=%d,wait_ms=%lld\r\n", lk,
+           (esp_timer_get_time() - t_lk0) / 1000);
+    fflush(stdout);
+    if (!lk)
+        return;
+    lv_obj_t *scr = lv_obj_create(NULL);
+    lv_obj_t *arc = lv_arc_create(scr);
+    lv_obj_t *bar = lv_obj_create(scr);
+    lv_obj_t *title = lv_label_create(scr);
+
+    s_fps_label = lv_label_create(scr);
+    s_fps_arc = arc;
+    s_fps_bar = bar;
+    lv_arc_set_range(arc, 0, 100);
+    lv_obj_set_size(arc, 300, 300);
+    lv_obj_align(arc, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_set_size(bar, 200, 60);
+    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -160);
+    lv_label_set_text(title, "Kaleido FPS test 800x1280");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_align(s_fps_label, LV_ALIGN_BOTTOM_MID, 0, -60);
+
+    lv_display_add_event_cb(lv_display_get_default(), refr_cb,
+                            LV_EVENT_REFR_READY, NULL);
+    lv_timer_t *tmr = lv_timer_create(fps_scene_timer_cb, 16, NULL);
+    lv_screen_load(scr);
+    lvgl_port_unlock();
+    printf("DSI,FPS,scene_loaded\r\n");
+    fflush(stdout);
+
+    /* 10 秒采样（锁外，LVGL 任务才能跑）；每秒报一次 */
+    for (int sec = 1; sec <= 10; sec++) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        printf("DSI,FPS,sec=%d,frames=%d,ticks=%d\r\n", sec, s_refr_cnt, s_tmr_cnt);
+        fflush(stdout);
+        s_refr_cnt = 0;
+        s_tmr_cnt = 0;
+    }
+    /* 保留动画定时器：场景持续动，供人眼判闪烁/撕裂 */
+    printf("DSI,FPS,DONE\r\n");
+    fflush(stdout);
+}
+
 void app_main(void)
 {
     /* LCD HW initialization */
@@ -278,31 +377,21 @@ void app_main(void)
     ESP_ERROR_CHECK(app_lvgl_init());
 
     /* Show LVGL objects */
-    lvgl_port_lock(0);
+    lvgl_port_lock(10000);
 
     // lv_demo_music();
     lv_demo_widgets();
 
     lvgl_port_unlock();
 
-    /* 显示线 HIL 菜单：w=widgets b=benchmark（跑分结果走串口 LV_LOG） */
-    printf("DSI,READY,w=widgets b=benchmark\r\n");
-    for (;;) {
-        int ch = getchar();
+    printf("DSI,READY,auto fps in 2s\r\n");
+    fflush(stdout);
 
-        if (ch == 'w' || ch == 'W') {
-            lvgl_port_lock(0);
-            lv_obj_clean(lv_screen_active());
-            lv_demo_widgets();
-            lvgl_port_unlock();
-            printf("DSI,DEMO,widgets\r\n");
-        } else if (ch == 'b' || ch == 'B') {
-            lvgl_port_lock(0);
-            lv_obj_clean(lv_screen_active());
-            lv_demo_benchmark();
-            lvgl_port_unlock();
-            printf("DSI,DEMO,benchmark\r\n");
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));
+    static StaticTask_t fps_taskbuf;
+    static StackType_t fps_stack[8192];
+    xTaskCreateStatic(fps_auto_task, "fpsauto", 8192, NULL, 3,
+                      fps_stack, &fps_taskbuf);
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
