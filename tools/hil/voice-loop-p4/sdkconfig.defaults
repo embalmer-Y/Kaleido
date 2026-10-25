@@ -33,3 +33,5 @@ CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
 #（sdio_drv.c:953，内部堆碎片化；MAX_SIZE 预分配模式在 2.12.9 启动即断言）。
 # 回默认配置保稳定，提速改由 TTS 预热/连接复用承担，专项浸泡后再引入。
 CONFIG_LWIP_TCP_SACK_OUT=y
+# esp_hosted 缓冲池优先 PSRAM（需 64B 缓存行，见上）
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y

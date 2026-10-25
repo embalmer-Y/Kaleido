@@ -29,7 +29,7 @@
 #include "sdkconfig.h"
 #include "sdmmc_cmd.h"
 
-#define CAP_SECONDS	6
+#define CAP_SECONDS	30 /* 负责人要求：真人轮 30s 窗防错过（'t' 内置轮不受影响）*/
 #define CAP_CHUNK	1600 /* 100ms @16k              */
 #define ROUND_MAX	5
 
@@ -570,6 +570,16 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 			vTaskDelay(pdMS_TO_TICKS(100));
 		}
 	} else {
+		/* 真人轮协议：哔一声（200ms 1kHz）= 开始说话 */
+		static int16_t cue[3200];
+
+		for (size_t i = 0; i < 3200; i++)
+			cue[i] = (int16_t)(4000.0f *
+				    sinf(2.0f * (float)M_PI * 1000.0f *
+					 (float)i / 16000.0f));
+		printf("VL,LIVE,beep=speak now %ds\r\n", CAP_SECONDS);
+		fflush(stdout);
+		aio_play(cue, 3200, 1000);
 		while (esp_timer_get_time() - cap_start <
 		       CAP_SECONDS * 1000000LL) {
 			int n = aio_capture(chunk, CAP_CHUNK, 500);
