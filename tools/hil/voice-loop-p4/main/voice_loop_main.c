@@ -46,7 +46,9 @@ static volatile int s_round;
 /* ---- 播放通路：WS 回调(WS 任务) → StreamBuffer → 播放任务 → I2S ---- */
 
 static StreamBufferHandle_t s_pb;
-#define PB_BYTES	32768
+/* TTS 突发下发远超实时：32KB 缓冲溢出丢块 => 语速忽快忽慢/后半段字挤在一起
+ * （负责人听感报告）。扩到 PSRAM 768KB（≈24s 回复全容纳）+ 100ms 背压 */
+#define PB_BYTES	786432
 
 static void play_task(void *arg)
 {
@@ -69,7 +71,7 @@ static void on_tts_pcm(void *user, const uint8_t *pcm, size_t len)
 {
 	if (!t_tts_first_pcm)
 		t_tts_first_pcm = esp_timer_get_time();
-	size_t w = xStreamBufferSend(s_pb, pcm, len, 0);
+	size_t w = xStreamBufferSend(s_pb, pcm, len, pdMS_TO_TICKS(100));
 
 	if (w != len)
 		ESP_LOGW(TAG, "pb drop %u/%u", (unsigned)(len - w),
@@ -668,7 +670,21 @@ void app_main(void)
 		ESP_LOGE(TAG, "aio fail");
 		return;
 	}
-	s_pb = xStreamBufferCreate(PB_BYTES, 1);
+	/* pvPortMalloc 只走内部堆（实测 768KB 创建即 NULL→断言），缓冲数据
+	 * 自取 PSRAM + Static 版本创建 */
+	static StaticStreamBuffer_t s_pb_static;
+	uint8_t *pb_mem = heap_caps_malloc(PB_BYTES, MALLOC_CAP_SPIRAM);
+
+	if (!pb_mem) {
+		ESP_LOGE(TAG, "pb mem fail");
+		return;
+	}
+	s_pb = xStreamBufferCreateStatic(PB_BYTES, 1, pb_mem,
+					 &s_pb_static);
+	if (!s_pb) {
+		ESP_LOGE(TAG, "pb create fail");
+		return;
+	}
 	xTaskCreatePinnedToCore(play_task, "pb", 4096, NULL, 5, NULL, 0);
 
 	printf("VL,READY,press 'g'+Enter to run a round\r\n");
