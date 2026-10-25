@@ -29,15 +29,7 @@ CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
 # SDIO 引脚用 P4 无预设默认值，恰=核心板实测走线：
 # CLK=18 CMD=19 D0=14 D1=15 D2=16 D3=17、复位=GPIO54（手册 p10 + esp_hosted 默认双验证）
 
-# --- esp_hosted/WiFi-remote 性能调优（26 号 §2 官方清单；默认配置 TCP 实测
-#     仅 ~0.68MB/s，TLS 建连 ~3s，是 M1.5 延迟主瓶颈）---
-CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=16
-CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=64
-CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM=64
-CONFIG_WIFI_RMT_TX_BA_WIN=32
-CONFIG_WIFI_RMT_RX_BA_WIN=32
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
-CONFIG_LWIP_TCP_WND_DEFAULT=65534
-CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
-CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+# 网络调优回退：streaming 模式下大窗口引发 sdio_rx_get_buffer 对齐分配断言
+#（sdio_drv.c:953，内部堆碎片化；MAX_SIZE 预分配模式在 2.12.9 启动即断言）。
+# 回默认配置保稳定，提速改由 TTS 预热/连接复用承担，专项浸泡后再引入。
 CONFIG_LWIP_TCP_SACK_OUT=y

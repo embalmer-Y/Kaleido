@@ -57,7 +57,7 @@ int aio_init(void)
 	i2s_std_config_t std_cfg = {
 		.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AIO_SR),
 		.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-			I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+			I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
 		.gpio_cfg = {
 			.mclk = AIO_MCLK,
 			.bclk = AIO_BCLK,
@@ -120,11 +120,11 @@ int aio_init(void)
 
 	esp_codec_dev_sample_info_t fs = {
 		.sample_rate = AIO_SR,
-		.channel = 1,
+		.channel = 2,
 		.bits_per_sample = 16,
 	};
 	esp_codec_dev_set_in_gain(s_in, 30.0); /* 硅麦；首验后标定 */
-	esp_codec_dev_set_out_vol(s_out, 70.0);
+	esp_codec_dev_set_out_vol(s_out, 55.0) /* 负责人听感：70 过大 */;
 	esp_codec_dev_open(s_in, &fs);
 	esp_codec_dev_open(s_out, &fs);
 	ESP_LOGI(TAG, "es8311 ready (adc+dac, 16k mono, pa=%d)", AIO_PA_PIN);
@@ -133,34 +133,69 @@ int aio_init(void)
 
 int aio_capture(int16_t *mono, size_t samples, uint32_t timeout_ms)
 {
-	size_t got = 0;
+	/* 立体声帧分块采回取左声道（S31 验证过的槽位无关方案） */
+	static int16_t st[3200];
+	size_t got_frames = 0;
 
-	while (got < samples * 2) {
-		size_t n;
+	while (got_frames < samples) {
+		size_t want = samples - got_frames;
+		size_t need, got = 0;
 
-		if (i2s_channel_read(s_rx, (char *)mono + got,
-				     samples * 2 - got, &n,
-				     pdMS_TO_TICKS(timeout_ms)) != ESP_OK ||
-		    n == 0)
-			break;
-		got += n;
+		if (want > sizeof(st) / 4)
+			want = sizeof(st) / 4;
+		need = want * 4;
+		while (got < need) {
+			size_t n;
+
+			if (i2s_channel_read(s_rx, (char *)st + got,
+					     need - got, &n,
+					     pdMS_TO_TICKS(timeout_ms)) != ESP_OK ||
+			    n == 0)
+				break;
+			got += n;
+		}
+		size_t f = got / 4;
+
+		for (size_t i = 0; i < f; i++)
+			mono[got_frames + i] = st[2 * i];
+		got_frames += f;
+		if (f < want)
+			break; /* 超时/断流 */
 	}
-	return got / 2;
+	return got_frames;
 }
 
 int aio_play(const int16_t *mono, size_t samples, uint32_t timeout_ms)
 {
-	size_t wrote = 0;
+	/* 双声道复制送出：codec 锁左锁右都能拿到数据 */
+	static int16_t st[3200];
+	size_t done = 0;
 
-	while (wrote < samples * 2) {
-		size_t n;
+	while (done < samples) {
+		size_t n = samples - done;
 
-		if (i2s_channel_write(s_tx, (const char *)mono + wrote,
-				      samples * 2 - wrote, &n,
-				      pdMS_TO_TICKS(timeout_ms)) != ESP_OK ||
-		    n == 0)
+		if (n > sizeof(st) / 4)
+			n = sizeof(st) / 4;
+		for (size_t i = 0; i < n; i++) {
+			st[2 * i] = mono[done + i];
+			st[2 * i + 1] = mono[done + i];
+		}
+		size_t wrote = 0;
+
+		while (wrote < n * 4) {
+			size_t m;
+
+			if (i2s_channel_write(s_tx,
+					      (const char *)st + wrote,
+					      n * 4 - wrote, &m,
+					      pdMS_TO_TICKS(timeout_ms)) != ESP_OK ||
+			    m == 0)
+				break;
+			wrote += m;
+		}
+		if (wrote < n * 4)
 			break;
-		wrote += n;
+		done += n;
 	}
-	return wrote / 2;
+	return done;
 }

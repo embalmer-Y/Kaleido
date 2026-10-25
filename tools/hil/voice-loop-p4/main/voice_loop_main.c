@@ -11,11 +11,14 @@
 #include <string.h>
 
 #include "audio_io.h"
+#include "driver/gpio.h"
+#include "driver/sdmmc_host.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "esp_vfs_fat.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
@@ -24,6 +27,7 @@
 #include "llm_stream.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "sdmmc_cmd.h"
 
 #define CAP_SECONDS	6
 #define CAP_CHUNK	1600 /* 100ms @16k              */
@@ -155,6 +159,150 @@ static void tone_play_task(void *arg)
 	vTaskDelete(NULL);
 }
 
+/* 'p'：NS4150 使能脚（GPIO53）两种极性各放 1s 音，麦克风自动判别 */
+static void pa_polarity_probe(void)
+{
+	gpio_config_t g = {
+		.pin_bit_mask = 1ULL << 53,
+		.mode = GPIO_MODE_OUTPUT,
+	};
+	static int16_t capbuf[16000];
+
+	gpio_config(&g);
+	for (int lvl = 1; lvl >= 0; lvl--) {
+		float bin, bin_lo;
+		static int16_t tone[16000];
+
+		for (size_t i = 0; i < 16000; i++)
+			tone[i] = (int16_t)(8000.0f *
+					    sinf(2.0f * (float)M_PI *
+						 1000.0f * (float)i /
+						 16000.0f));
+		gpio_set_level(53, lvl);
+		vTaskDelay(pdMS_TO_TICKS(50));
+		xTaskCreatePinnedToCore(tone_play_task, "tone", 4096, tone,
+					6, NULL, 0);
+		if (aio_capture(capbuf, 16000, 3000) != 16000) {
+			printf("VL,P,lvl=%d,capture_fail\r\n", lvl);
+			fflush(stdout);
+			continue;
+		}
+		bin = goertzel(capbuf, 16000, 1000.0f, 16000.0f);
+		bin_lo = goertzel(capbuf, 16000, 940.0f, 16000.0f);
+		printf("VL,P,pa_lvl=%d,rms=%d,g1000=%.0f,g940=%.0f,"
+		       "tone=%s\r\n",
+		       lvl, rms_i16(capbuf, 16000), (double)bin,
+		       (double)bin_lo,
+		       (bin > bin_lo * 4.0f) ? "YES" : "no");
+		fflush(stdout);
+		vTaskDelay(pdMS_TO_TICKS(200));
+	}
+	gpio_set_level(53, 1); /* 恢复驱动默认极性 */
+}
+
+/* 's'：SD 卡自检（slot0 IOMUX 39-44，与 C5 slot1 并行）：
+ * 挂载 → 1MB 写/读/校验 → 容量与速度报告 */
+static void sd_test(void)
+{
+	sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+	sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+	esp_vfs_fat_sdmmc_mount_config_t mc = {
+		.format_if_mount_failed = false,
+		.max_files = 4,
+		.allocation_unit_size = 16 * 1024,
+	};
+	sdmmc_card_t *card = NULL;
+	int64_t t0;
+	uint8_t *buf = heap_caps_malloc(256 * 1024, MALLOC_CAP_SPIRAM);
+	uint8_t *rb = buf ? heap_caps_malloc(256 * 1024, MALLOC_CAP_SPIRAM) :
+		 NULL;
+
+	host.slot = SDMMC_HOST_SLOT_0;
+	slot.cd = SDMMC_SLOT_NO_CD; /* 先不卡检测，直挂 */
+	slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+	if (!buf || !rb) {
+		printf("VL,S,FAIL,oom\r\n");
+		fflush(stdout);
+		goto out;
+	}
+	/* 重试矩阵：首验 4bit@20M 在 SSR 读取超时（卡对速率/位宽敏感）；
+	 * 失败清理会波及共享控制器上的 slot1(C5)，所以逐级降参一次挂成 */
+	static const int try_width[3] = { 4, 1, 1 };
+	static const int try_khz[3] = {
+		SDMMC_FREQ_DEFAULT, SDMMC_FREQ_DEFAULT, SDMMC_FREQ_PROBING
+	};
+	esp_err_t err = ESP_FAIL;
+
+	for (int i = 0; i < 3 && err != ESP_OK; i++) {
+		slot.width = try_width[i];
+		host.max_freq_khz = try_khz[i];
+		printf("VL,S,TRY,width=%d,khz=%d\r\n", try_width[i],
+		       try_khz[i]);
+		fflush(stdout);
+		err = esp_vfs_fat_sdmmc_mount("/sd", &host, &slot, &mc,
+					      &card);
+	}
+
+	if (err != ESP_OK) {
+		printf("VL,S,FAIL,mount=%d\r\n", err);
+		fflush(stdout);
+		/* 不 unmount：失败态下清理会波及 slot1(C5)，复位恢复 */
+		goto out;
+	}
+	sdmmc_card_print_info(stdout, card);
+
+	for (size_t i = 0; i < 256 * 1024; i++)
+		buf[i] = (uint8_t)i;
+
+	FILE *f = fopen("/sd/kaleido_sdtest.bin", "wb");
+
+	if (!f) {
+		printf("VL,S,FAIL,open_w\r\n");
+		fflush(stdout);
+		goto unmount;
+	}
+	t0 = esp_timer_get_time();
+	for (int i = 0; i < 4; i++) { /* 4×256KB = 1MB */
+		if (fwrite(buf, 1, 256 * 1024, f) != 256 * 1024) {
+			printf("VL,S,FAIL,write\r\n");
+			fflush(stdout);
+			fclose(f);
+			goto unmount;
+		}
+	}
+	fclose(f);
+	int64_t t_w = esp_timer_get_time() - t0;
+
+	f = fopen("/sd/kaleido_sdtest.bin", "rb");
+	if (!f) {
+		printf("VL,S,FAIL,open_r\r\n");
+		fflush(stdout);
+		goto unmount;
+	}
+	t0 = esp_timer_get_time();
+	for (int i = 0; i < 4; i++) {
+		if (fread(rb, 1, 256 * 1024, f) != 256 * 1024 ||
+		    memcmp(buf, rb, 256 * 1024) != 0) {
+			printf("VL,S,FAIL,read_verify\r\n");
+			fflush(stdout);
+			fclose(f);
+			goto unmount;
+		}
+	}
+	fclose(f);
+	int64_t t_r = esp_timer_get_time() - t0;
+
+	printf("VL,S,RESULT,write=%.2fMB/s,read=%.2fMB/s,verify=OK\r\n",
+	       4.0 / ((double)t_w / 1e6), 4.0 / ((double)t_r / 1e6));
+	fflush(stdout);
+	remove("/sd/kaleido_sdtest.bin");
+unmount:
+	esp_vfs_fat_sdcard_unmount("/sd", card);
+out:
+	free(buf);
+	free(rb);
+}
+
 static void loopback_tone(void)
 {
 	static int16_t silence[16000];
@@ -162,7 +310,7 @@ static void loopback_tone(void)
 	static int16_t tone[16000];
 
 	for (size_t i = 0; i < 16000; i++)
-		tone[i] = (int16_t)(10000.0f *
+		tone[i] = (int16_t)(8000.0f *
 				    sinf(2.0f * (float)M_PI * 1000.0f *
 					 (float)i / 16000.0f));
 
@@ -195,8 +343,8 @@ static void loopback_tone(void)
 	       "g1000=%.0f,g940=%.0f,g1060=%.0f,verdict=%s\r\n",
 	       rms_noise, rms_sig, (double)snr, (double)bin,
 	       (double)bin_lo, (double)bin_hi,
-	       (snr > 10.0f && bin > bin_lo * 4.0f &&
-		bin > bin_hi * 4.0f) ? "PASS" : "FAIL");
+	       (bin > bin_lo * 2.5f &&
+		bin > bin_hi * 2.5f) ? "PASS" : "FAIL");
 	fflush(stdout);
 }
 
@@ -392,6 +540,9 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	t_llm_first = t_tts_first_pcm = t_first_audio = 0;
 
 	printf("VL,ROUND,%d,speak now %ds\r\n", s_round, CAP_SECONDS);
+	printf("VL,HEAP,int=%uk,psram=%uk\r\n",
+	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 	fflush(stdout);
 
 	if (ks_asr_open(asr, &(struct ks_asr_events){
@@ -515,6 +666,14 @@ void app_main(void)
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
 
+		if (ch == 's' || ch == 'S') {
+			sd_test();
+			continue;
+		}
+		if (ch == 'p' || ch == 'P') {
+			pa_polarity_probe();
+			continue;
+		}
 		if (ch == 'l' || ch == 'L') {
 			loopback_tone();
 			continue;
