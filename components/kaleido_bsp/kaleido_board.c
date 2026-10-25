@@ -1,20 +1,24 @@
 /*
- * kaleido_board.c — 板级能力画像（M0：默认 Korvo-1；kaleido_v1 待 G2 引脚冻结）
+ * kaleido_board.c — 板级能力画像
  *
- * 能力位与 G1 报告 15 附节核实结果一致：
- *   Korvo-1 V1.1 = WROOM-3 同款模组 / 2×模拟麦+ES8389+2×NS4150B（非 PDM、非 I2S
- * 功放） / DVP 摄像头座 / 4.3" RGB LCD 子板 / 无磁吸 POGO。
+ * 当前主开发板：osptek P4C5 底板（D-8 平台切换，2026-10-25 起）。
+ * p4c5 = ESP32-P4(16MB flash/32MB HEX PSRAM) + C5HF4(WiFi6, esp_hosted 2.12.9)
+ *        / ES8311+NS4150+单模拟麦 / 10.1" 800×1280 JD9366 MIPI-DSI（in-cell
+ *        触摸 I2C GPIO7/8）/ TF 卡槽 / MIPI-CSI 座（摄像头未上车）。
  */
 #include "kaleido_board.h"
 
 static const kaleido_board_caps_t s_caps = {
-    .board = KALEIDO_BOARD_KORVO1,
-    .name = "esp32-s31-korvo-1-v1.1",
+    .board = KALEIDO_BOARD_P4C5_OSPTEK,
+    .name = "osptek-esp32-p4c5-10.1",
     .has_qspi_amoled = false,
     .has_pdm_mics = false,
-    .has_dvp_camera = true,
+    .has_dvp_camera = false,
     .has_audio_amp_i2s = false,
     .has_accessory_pogo = false,
+    .has_mipi_dsi_screen = true,
+    .has_c5_wifi = true,
+    .has_tf_card = true,
 };
 
 const kaleido_board_caps_t *kaleido_board_caps(void)

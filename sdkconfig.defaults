@@ -1,1 +1,31 @@
-# M0 占位：SDK 配置基线（M1 按 S31 preview 支持情况细化）
+# Kaleido-Claw 主固件基线 — osptek P4C5（D-8 平台切换，2026-10-25）
+# 依据：p4-bringup B-1 实测 + esp_lvgl_port performance.md + osptek JD9366 例程口径
+CONFIG_IDF_TARGET="esp32p4"
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
+
+# 32MB 片内叠封 HEX PSRAM。XIP-on-PSRAM 在本板 v3.2 上挂死于 heap_init 后
+# （B-2 实测：完全静默、无 WDT 复位；关闭后正常——根因待 V-37 标定时查）
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+
+# 缓存/编译器性能基线
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# flash：16MB QIO；实测为 Boya（JEDEC 0x68），必须启用专用驱动（B-2：
+# 通用驱动 + QIO 在 sleep_gpio 初始化后 Store access fault panic）
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_NO_STUB=y
+CONFIG_SPI_FLASH_SUPPORT_BOYA_FLASH_CHIP=y
+
+# 分区沿用出厂布局（bootloader 到 0x10000、factory 8MB + storage 7MB；
+# XIP-on-PSRAM 使 bootloader 达 0x6140，超出 0x8000 表偏移的 0x6000 限额）
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x10000
+
+# 控制台走 UART0（板载 CH343P 调试口）
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
