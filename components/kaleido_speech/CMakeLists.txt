@@ -1,4 +1,4 @@
 idf_component_register(SRCS "src/sp_dashscope.c"
                        INCLUDE_DIRS "include"
                        REQUIRES esp_websocket_client espressif__cjson
-                       PRIV_REQUIRES esp_timer esp_driver_uart)
+                       PRIV_REQUIRES esp_timer esp_driver_uart esp-tls)

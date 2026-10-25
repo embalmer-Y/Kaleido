@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -49,6 +50,7 @@ static char *run_task_build(const char *task_id, const char *model,
 	cJSON *hdr = cJSON_CreateObject();
 	cJSON *pl = cJSON_CreateObject();
 	cJSON *par = cJSON_CreateObject();
+	cJSON *in = cJSON_CreateObject();
 	char *s;
 	bool tts = (voice != NULL);
 
@@ -72,6 +74,9 @@ static char *run_task_build(const char *task_id, const char *model,
 		cJSON_AddNumberToObject(par, "pitch", 1);
 	}
 	cJSON_AddItemToObject(pl, "parameters", par);
+	/* run-task 必带空 input 对象（V-33 asr_probe 实证；缺此字段
+	 * 服务端报 InvalidParameter: Missing required parameter 'payload.input'） */
+	cJSON_AddItemToObject(pl, "input", in);
 	cJSON_AddItemToObject(root, "header", hdr);
 	cJSON_AddItemToObject(root, "payload", pl);
 
@@ -239,6 +244,7 @@ int ks_asr_open(const struct ks_asr_cfg *cfg,
 	esp_websocket_client_config_t wc = {
 		.buffer_size = 4096,
 		.network_timeout_ms = 10000,
+		.crt_bundle_attach = esp_crt_bundle_attach,
 	};
 
 	if (s_asr)
@@ -449,6 +455,7 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 	esp_websocket_client_config_t wc = {
 		.buffer_size = 4096,
 		.network_timeout_ms = 10000,
+		.crt_bundle_attach = esp_crt_bundle_attach,
 	};
 
 	if (s_tts)
