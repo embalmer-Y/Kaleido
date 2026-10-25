@@ -1,7 +1,7 @@
 /*
  * kaleido_apps_builtin.c — 出厂内置 App（C 静态注册）
  *
- * M0 提供最小可跑集：时钟、设置占位。相机/音乐/Muse avatar 等随 BSP 就绪在
+ * M0 提供最小可跑集：时钟、设置占位。相机/音乐/角色形象等随 BSP 就绪在
  * M1/M2 增补。
  */
 #include "kaleido_app.h"

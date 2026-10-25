@@ -27,7 +27,6 @@ Kaleido 智能桌搭固件（**Kaleido-Claw** 架构）。架构设计：`../doc
 |---|---|---|
 | ESP-IDF | v6.1 @ `fff9895c` **+ backport `c566ace1f`**（本地提交 c55d13c6：XIP PSRAM+BSS/NOINIT 链接修复，esp-idf#18791；release/v6.1 未回合） | esp32s31 preview target |
 | esp-claw | `9b23c15` **+ PR#157 补丁**（本地提交 3177144：PSRAM 栈×flash cache 崩溃修复，W-3） | ../vendor/esp-claw，Apache-2.0 |
-| muse-gadget-sdk | c9354b7a765cfb7dd3c4f1945a9ca838d871630c | ../vendor/muse-gadget-sdk，Apache-2.0；集成前闭环 tinyh264 LGPL 疑点（docs/vendor-licenses.md R-7） |
 | espressif/cjson | ^1.7（lock: 1.7.19~2） | IDF v6 起替代核心 json 组件 |
 | esp-sr | **2.6.0**（2026-10-24 esp32s31 编译验证通过：AFE 头文件+全组件 1300+ 目标构建 OK） | M1 接入 WakeNet/AFE（V-04 运行时验证待板卡串口权限） |
 | esp_codec_dev | v2.0.x | M2 接入（TAS5805M 播放驱动，硬件验证 N） |
@@ -40,7 +39,6 @@ Kaleido 智能桌搭固件（**Kaleido-Claw** 架构）。架构设计：`../doc
 | kaleido_bsp | 板级抽象（korvo1 / kaleido_v1 双实现） | 头文件占位，引脚表待 G2 冻结 |
 | kaleido_audio | 音频管线 + 焦点管理器（全数字链路） | 占位（依赖 G2 验证 V-01/04） |
 | kaleido_ui | KShell（LVGL9+PPA+JPEG）+ token 生成物 | 占位，tokens.json 已立单源 |
-| kaleido_muse | Muse Link 包裹层（KALEIDO_ENABLE_MUSE 开关） | 占位 |
 | kaleido_accessory | 扩展 HAL（顶部传感器位 + 底部执行器底座） | 占位（协议 v1 基线=报告16） |
 | kaleido_claw | esp-claw 装配层（上游零侵入胶水） | 占位（M1） |
 
