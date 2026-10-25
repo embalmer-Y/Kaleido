@@ -2,11 +2,13 @@
  * lottie_stage.c — 角色舞台 L0：pthread 渲染（thorvg 1.1.2）+ LVGL 合成并行
  *
  * 30fps 架构（V-35R + 30fps 冲刺）：
- *   渲染 pthread：325² ARGB8888 双缓冲（PSRAM）按 30fps 节拍渲染，
- *     只写后台缓冲，完成即置就绪标志（从不碰前台指针）。
- *   LVGL 16ms 定时器：在 LVGL 任务内采纳最新就绪帧（换 dsc.data +
- *     invalidate），合成与渲染并行、指针仅在 LVGL 上下文切换——
- *     消除首版"合成中途换前台指针"的撕裂与闪烁根源。
+ *   渲染 pthread：325² ARGB8888 三缓冲（PSRAM）按 30fps 节拍渲染，
+ *     只写"既不在屏也非就绪"的缓冲，完成即置就绪标志。
+ *     每帧先 memset 清缓冲——ThorVG 不清屏，移动元素的旧像素
+ *     会残留成彩块重影（V-39 照片实锤）。
+ *   LVGL 16ms 定时器：任务内采纳就绪帧，走 lv_canvas 换缓冲 + 
+ *     invalidate（官方 esp_lv_lottie_player 同款合成路径，
+ *     绕开 lv_image 换源指针的缓存/双 fb 同步盲区）。
  */
 #include <pthread.h>
 #include <stdatomic.h>
@@ -37,16 +39,7 @@ static uint32_t *s_buf[STAGE_NBUF];
  * 三缓冲消除双缓冲下的生产/消费相位失锁（实测渲染率腰斩） */
 static volatile int s_ready_idx = -1;
 static volatile int s_disp_idx;
-static lv_image_dsc_t s_img_dsc = {
-	.header = {
-		.w = STAGE_W,
-		.h = STAGE_H,
-		.cf = LV_COLOR_FORMAT_ARGB8888,
-	},
-	.data = NULL,
-	.data_size = STAGE_W * STAGE_H * 4,
-};
-static lv_obj_t *s_img;
+static lv_obj_t *s_img;	/* lv_canvas：合成走官方播放器验证路径 */
 static lv_timer_t *s_stage_timer;
 static volatile int s_render_cnt;
 static volatile int s_disp_cnt;
@@ -109,6 +102,7 @@ static void *stage_pthread(void *arg)
 			}
 		}
 		if (back >= 0) {
+			memset(s_buf[back], 0, STAGE_W * STAGE_H * 4);
 			tvg_swcanvas_set_target(canvas, s_buf[back], STAGE_W,
 						STAGE_W, STAGE_H,
 						TVG_COLORSPACE_ARGB8888);
@@ -156,8 +150,8 @@ static void stage_timer_cb(lv_timer_t *t)
 	int cand = s_ready_idx;
 
 	if (cand >= 0 && cand != s_disp_idx) {
-		s_img_dsc.data = (const uint8_t *)s_buf[cand];
-		lv_image_set_src(s_img, &s_img_dsc);
+		lv_canvas_set_buffer(s_img, s_buf[cand], STAGE_W, STAGE_H,
+				     LV_COLOR_FORMAT_ARGB8888);
 		lv_obj_invalidate(s_img);
 		s_disp_idx = cand;
 		s_ready_idx = -1;
@@ -195,9 +189,9 @@ int lottie_stage_start(void)
 	lv_obj_set_style_bg_color(scr, lv_color_hex(0x101828), 0);
 	lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-	s_img = lv_image_create(scr);
-	s_img_dsc.data = (const uint8_t *)s_buf[0];
-	lv_image_set_src(s_img, &s_img_dsc);
+	s_img = lv_canvas_create(scr);
+	lv_canvas_set_buffer(s_img, s_buf[0], STAGE_W, STAGE_H,
+			     LV_COLOR_FORMAT_ARGB8888);
 	lv_obj_align(s_img, LV_ALIGN_CENTER, 0, 40);
 	lv_label_set_text(title, "Kaleido stage L0 (parallel 30fps)");
 	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 16);
