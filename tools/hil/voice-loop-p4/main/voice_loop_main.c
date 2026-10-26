@@ -491,6 +491,107 @@ out:
 	free(cap);
 }
 
+/* 堆监视器实现位于本文件后段，此处前置声明 */
+int voice_heapmon_start(void);
+int voice_heapmon_stop(void);
+
+/* ---- V-44a 双 TLS 并发探针：ASR WS 流式 × LLM HTTPS 同跑 ----
+ * 早切（V-44）必然引入此并发；V-43 曾实证 TTS×ASR 同类并发会把内部
+ * RAM 打穿（esp-aes 对齐缓冲分配失败）。本探针量化该形态的堆谷值与
+ * 双链路成败，决定早切采用并行收尾还是先关 ASR 再起 LLM */
+static struct {
+	struct ks_asr_cfg *asr;
+	struct ks_llm_cfg *llm;
+	volatile int llm_rc;
+	volatile bool llm_done;
+} s_probe;
+
+static bool probe_llm_cb(void *user, const char *sentence, bool final)
+{
+	(void)user; (void)sentence; (void)final;
+	return true;	/* 只测链路，不消费输出 */
+}
+
+static void probe_llm_task(void *arg)
+{
+	(void)arg;
+	s_probe.llm_rc = ks_llm_chat(s_probe.llm, probe_llm_cb, NULL, NULL);
+	s_probe.llm_done = true;
+	vTaskDelete(NULL);
+}
+
+static void dualtls_probe_task(void *arg)
+{
+	const int16_t *pcm = (const void *)test_prompt_start;
+	size_t total = (test_prompt_end - test_prompt_start) / 2;
+	int64_t t0 = esp_timer_get_time();
+	size_t fed = 0;
+	int asr_rc;
+
+	(void)arg;
+	if (voice_heapmon_start() != 0) {
+		printf("VL,PROBE,DUALTLS,mon=fail\r\n");
+		fflush(stdout);
+		vTaskDelete(NULL);
+		return;
+	}
+	if (ks_asr_open(s_probe.asr, &(struct ks_asr_events){
+			.on_text = on_asr_text }) != 0) {
+		vTaskDelay(pdMS_TO_TICKS(1000));
+		if (ks_asr_open(s_probe.asr, &(struct ks_asr_events){
+				.on_text = on_asr_text }) != 0) {
+			printf("VL,PROBE,DUALTLS,asr_open=fail,int_min=%dkb\r\n",
+			       voice_heapmon_stop());
+			fflush(stdout);
+			vTaskDelete(NULL);
+			return;
+		}
+	}
+	s_probe.llm_done = false;
+	if (xTaskCreatePinnedToCore(probe_llm_task, "p_llm", 16384, NULL,
+				    5, NULL, 0) != pdPASS) {
+		ks_asr_close();
+		printf("VL,PROBE,DUALTLS,llm_task=fail,int_min=%dkb\r\n",
+		       voice_heapmon_stop());
+		fflush(stdout);
+		vTaskDelete(NULL);
+		return;
+	}
+	printf("VL,PROBE,phase=asr-opened,llm=started\r\n");
+	fflush(stdout);
+	/* 喂 6s 内置 PCM（1x 节奏），保证与 LLM TLS 窗口重叠 */
+	while (fed < total && esp_timer_get_time() - t0 < 6000000) {
+		size_t n = CAP_CHUNK;
+
+		if (n > total - fed)
+			n = total - fed;
+		if (ks_asr_feed(pcm + fed, n) < 0)
+			break;
+		fed += n;
+		vTaskDelay(pdMS_TO_TICKS(100));
+	}
+	{
+		int64_t t = esp_timer_get_time();
+
+		while (!s_probe.llm_done) {
+			if (esp_timer_get_time() - t > 60000000)
+				break;	/* 60s 兜底：llm 挂死也收口 */
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+	}
+	printf("VL,PROBE,phase=fed=%u,llm_done=%d\r\n",
+	       (unsigned)fed, s_probe.llm_done);
+	fflush(stdout);
+	asr_rc = ks_asr_finish(3000);
+	ks_asr_close();
+	printf("VL,PROBE,DUALTLS,int_min=%dkb,asr_finish=%d,llm_rc=%d,"
+	       "overlap_ms=%lld\r\n",
+	       voice_heapmon_stop(), asr_rc, s_probe.llm_rc,
+	       (esp_timer_get_time() - t0) / 1000);
+	fflush(stdout);
+	vTaskDelete(NULL);
+}
+
 /* ---- WiFi（M1 已验证路径，最简 station）----
  * 凭据走取值链 NVS → CONFIG（HIL 开发后备）；netif/事件环由 app_main
  * 先行初始化（OOBE 的 SoftAP 分支也依赖） */
@@ -658,6 +759,60 @@ out:
 		ESP_LOGW(TAG, "pump cleanup timeout");
 	pump_tts_detach();
 	return rc;
+}
+
+/* ---- 堆谷值监视器（V-44a 双 TLS 峰值实测用）---- */
+static volatile int s_int_min_kb;
+static volatile bool s_mon_on;
+
+static void heapmon_task(void *arg)
+{
+	(void)arg;
+	while (s_mon_on) {
+		int kb = (int)(heap_caps_get_free_size(
+					MALLOC_CAP_INTERNAL) / 1024);
+
+		if (kb < s_int_min_kb)
+			s_int_min_kb = kb;
+		vTaskDelay(pdMS_TO_TICKS(100));
+	}
+	vTaskDelete(NULL);
+}
+
+/* 开监视（谷值初始化为当前值）；stop 返回谷值 */
+int voice_heapmon_start(void)
+{
+	s_int_min_kb = (int)(heap_caps_get_free_size(
+				MALLOC_CAP_INTERNAL) / 1024);
+	s_mon_on = true;
+	if (xTaskCreate(heapmon_task, "heapmon", 2048, NULL, 4,
+			NULL) != pdPASS)
+		return -1;
+	return 0;
+}
+
+int voice_heapmon_stop(void)
+{
+	s_mon_on = false;
+	vTaskDelay(pdMS_TO_TICKS(150));	/* 让任务自删并采到尾样 */
+	return s_int_min_kb;
+}
+
+/* ---- 遥测取值器（convo_fsm/探针跨模块）---- */
+int64_t voice_first_audio_us(void)
+{
+	return t_first_audio;
+}
+
+int64_t voice_tts_first_pcm_us(void)
+{
+	return t_tts_first_pcm;
+}
+
+void voice_round_ts_reset(void)
+{
+	t_tts_first_pcm = 0;
+	t_first_audio = 0;
 }
 
 /* ---- 凭据取值链（V-42 OOBE）：NVS → CONFIG（HIL 开发后备）→ 空 ---- */
@@ -883,6 +1038,23 @@ void app_main(void)
 				printf("VL,CONVO,OFF\r\n");
 			}
 			fflush(stdout);
+			continue;
+		}
+		if (ch == 'E') {
+			/* V-44a 双 TLS 并发探针 */
+			if (s_busy || wakenet_selftest_busy() ||
+			    convo_active()) {
+				printf("VL,BUSY\r\n");
+				fflush(stdout);
+				continue;
+			}
+			s_probe.asr = &asr;
+			s_probe.llm = &llm;
+			llm.user_msg = "现在几点了？请简短回答。";
+			printf("VL,PROBE,DUALTLS,start\r\n");
+			fflush(stdout);
+			xTaskCreatePinnedToCore(dualtls_probe_task, "p_asr",
+						16384, NULL, 5, NULL, 0);
 			continue;
 		}
 		if (ch == 'n' || ch == 'N') {

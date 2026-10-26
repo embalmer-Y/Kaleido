@@ -33,6 +33,8 @@
 /* voice_loop_main 的播放通路（单一写者原则下的跨模块挂点） */
 extern void on_tts_pcm(void *user, const uint8_t *pcm, size_t len);
 extern size_t pb_pending(void);
+extern int64_t voice_first_audio_us(void);
+extern void voice_round_ts_reset(void);
 /* 内置语音（'t'/'a' 已证过空气可被 ASR 转写）：soak 用它扮演"用户
  * 提问"——避免 TTS 与 ASR WS 双 TLS 并发（实测该并发把内部 RAM 打穿：
  * esp-aes 对齐缓冲分配失败 → WS 写崩，8/10 轮 rc=-2 的真因） */
@@ -53,7 +55,9 @@ static QueueHandle_t s_wake_q;
 static struct ks_asr_cfg *s_asr;
 static struct ks_tts_cfg *s_tts;
 static struct ks_llm_cfg *s_llm;
-static char s_text[512];
+static char s_text[512];	/* 定稿句累积 */
+static char s_partial[512];	/* 当前句最新 partial（早切用） */
+static char s_full[1024];	/* 早切送 LLM 的组合文本 */
 
 enum convo_state convo_state_get(void)
 {
@@ -83,9 +87,25 @@ void convo_notify_wake(void)
 static void on_asr_text(void *user, const char *sentence, bool final)
 {
 	(void)user;
-	if (!final || !sentence[0])
+	if (!sentence || !sentence[0])
 		return;
-	strlcat(s_text, sentence, sizeof(s_text));
+	if (final) {
+		strlcat(s_text, sentence, sizeof(s_text));
+		s_partial[0] = '\0';
+	} else {
+		/* partial 为同句增量快照，后到覆盖先到 */
+		strlcpy(s_partial, sentence, sizeof(s_partial));
+	}
+}
+
+/* ASR 收尾（早切形态下与 LLM 并行；V-44a 探针实证 ASR WS × LLM TLS
+ * 并发可行，内部 RAM 谷值 38-43KB） */
+static void asr_closer_task(void *arg)
+{
+	(void)arg;
+	ks_asr_finish(3000);
+	ks_asr_close();
+	vTaskDelete(NULL);
 }
 
 static int rms_i16(const int16_t *p, size_t n)
@@ -171,13 +191,15 @@ static bool wait_state(enum convo_state st, uint32_t timeout_ms)
 
 /* 一轮：LISTENING→THINKING→SPEAKING，返回 0 或负错码（对齐菜单轮）。
  * speech_ms_out（可 NULL）带走 VAD 测得的实际说话时长 */
-static int convo_round(int64_t *speech_ms_out)
+static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 {
-	int64_t t_cap_end;
 	int64_t speech_ms = 0;
+	int64_t t_cut;
 	int rc = 0;
 
 	s_text[0] = '\0';
+	s_partial[0] = '\0';
+	s_full[0] = '\0';
 	pump_reset();
 
 	if (ks_asr_open(s_asr, &(struct ks_asr_events){
@@ -190,19 +212,28 @@ static int convo_round(int64_t *speech_ms_out)
 	listen_capture(&speech_ms);
 	if (speech_ms_out)
 		*speech_ms_out = speech_ms;
-	t_cap_end = esp_timer_get_time();
+	t_cut = esp_timer_get_time();
+	/* 首音时点从截断处重新起算：soak 的提问回放也走播放流，
+	 * 不重置会把 first_audio 记到提问头上（负值教训） */
+	voice_round_ts_reset();
 	s_state = CONVO_THINKING;
 
-	rc = ks_asr_finish(15000) == 0 ? 0 : -2;
-	ks_asr_close();
-	if (rc)
-		return rc;
-	if (!s_text[0])
+	/* 早切（V-44）：VAD 截断即起 LLM（定稿 + 最新 partial 组合），
+	 * ASR 收尾并行——省掉 asr_final 段（实测 0.3-0.6s）出关键路径。
+	 * 风险（尾词缺失）由 VAD 的 1.2s 静音判据兜底 */
+	strlcpy(s_full, s_text, sizeof(s_full));
+	strlcat(s_full, s_partial, sizeof(s_full));
+	if (!s_full[0]) {
+		ks_asr_finish(3000);	/* 空轮：同步收尾即可 */
+		ks_asr_close();
 		return -3;	/* 空 ASR：安静地回 IDLE */
+	}
+	xTaskCreatePinnedToCore(asr_closer_task, "asr_close", 4096, NULL,
+				5, NULL, 0);
 
 	if (pump_tts_attach(s_tts, on_tts_pcm) != 0)
 		return -5;
-	s_llm->user_msg = s_text;
+	s_llm->user_msg = s_full;
 	rc = ks_llm_chat(s_llm, pump_on_llm_sentence, NULL, NULL);
 	if (!pump_stop(30000))
 		ESP_LOGW(TAG, "pump not done in 30s");
@@ -212,9 +243,11 @@ static int convo_round(int64_t *speech_ms_out)
 	for (int i = 0; i < 100 && pb_pending(); i++)
 		vTaskDelay(pdMS_TO_TICKS(200));
 	pump_tts_detach();
+	if (cut2audio_ms)
+		*cut2audio_ms = voice_first_audio_us() ?
+			(voice_first_audio_us() - t_cut) / 1000 : -1;
 	if (rc != 0)
 		return -4;
-	(void)t_cap_end;
 	return 0;
 }
 
@@ -231,15 +264,17 @@ static void convo_task(void *arg)
 		s_state = CONVO_LISTENING;
 		{
 			int64_t speech_ms = 0;
-			int rc = convo_round(&speech_ms);
+			int64_t cut2audio = -1;
+			int rc = convo_round(&speech_ms, &cut2audio);
 			int64_t el = t_last ? esp_timer_get_time() - t_last : 0;
 
 			t_last = esp_timer_get_time();
 			s_round_cnt++;
 			printf("VL,CONVO,ROUND,n=%d,rc=%d,speech_ms=%lld,"
-			       "asr_len=%d,el_ms=%lld,int=%uk,ps=%uk\r\n",
+			       "asr_len=%d,cut2audio_ms=%lld,el_ms=%lld,"
+			       "int=%uk,ps=%uk\r\n",
 			       s_round_cnt, rc, speech_ms,
-			       (int)strlen(s_text), el / 1000,
+			       (int)strlen(s_full), cut2audio, el / 1000,
 			       (unsigned)(heap_caps_get_free_size(
 					  MALLOC_CAP_INTERNAL) / 1024),
 			       (unsigned)(heap_caps_get_free_size(
