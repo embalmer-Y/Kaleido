@@ -1,0 +1,22 @@
+menu "kaleido_speech"
+
+choice KS_TTS_PROVIDER
+	prompt "TTS provider"
+	default KS_TTS_PROVIDER_MINIMAX
+	config KS_TTS_PROVIDER_DASHSCOPE
+		bool "DashScope cosyvoice (WS)"
+	config KS_TTS_PROVIDER_MINIMAX
+		bool "MiniMax t2a_v2 (HTTPS SSE)"
+endchoice
+
+config KS_TTS_MM_MODEL
+	string "MiniMax TTS model"
+	default "speech-2.5-hd-preview"
+config KS_TTS_MM_VOICE
+	string "MiniMax voice id"
+	default "female-tianmei"
+config KS_MM_KEY
+	string "MiniMax API key (JWT)"
+	default ""
+
+endmenu

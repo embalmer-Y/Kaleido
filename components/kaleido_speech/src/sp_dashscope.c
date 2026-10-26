@@ -189,6 +189,7 @@ struct ks_asr_sess {
 	size_t pend_len;
 	bool failed;
 	bool done;
+	bool closing;	/* V-41：关闭期事件直接丢弃（UAF 竞态防御） */
 };
 
 static struct ks_asr_sess *s_asr;
@@ -200,6 +201,10 @@ static void asr_ws_event(void *arg, esp_event_base_t base, int32_t id,
 	char event[24] = "", sentence[512] = "", err[160] = "";
 	bool send_end = false;
 
+	/* 实测（V-41）：恶劣网况下 close 超时后 destroy，客户端任务仍在
+	 * 派发残余事件 → 对已 free 会话取字段 → PSRAM 指针当代码跳 */
+	if (!s_asr || s_asr->closing)
+		return;
 	if (id == WEBSOCKET_EVENT_CONNECTED) {
 		xSemaphoreGive(s_asr->connected);
 		return;
@@ -370,9 +375,11 @@ void ks_asr_close(void)
 {
 	if (!s_asr)
 		return;
+	s_asr->closing = true;
 	if (s_asr->ws) {
 		esp_websocket_client_close(s_asr->ws,
 					   pdMS_TO_TICKS(2000));
+		vTaskDelay(pdMS_TO_TICKS(50));
 		esp_websocket_client_destroy(s_asr->ws);
 	}
 	vSemaphoreDelete(s_asr->connected);
@@ -381,6 +388,10 @@ void ks_asr_close(void)
 	free(s_asr);
 	s_asr = NULL;
 }
+
+/* ---- TTS 会话 ----
+ * V-41：TTS 可切 MiniMax（t2a_v2，见 sp_minimax.c）；DashScope 实现整段编译隔离 */
+#if !CONFIG_KS_TTS_PROVIDER_MINIMAX
 
 /* ---- TTS 会话 ---- */
 
@@ -574,3 +585,4 @@ void ks_tts_close(void)
 	free(s_tts);
 	s_tts = NULL;
 }
+#endif  /* !CONFIG_KS_TTS_PROVIDER_MINIMAX */

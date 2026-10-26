@@ -18,7 +18,7 @@ struct llm_ctx {
 	void *user;
 	int64_t t0;
 	int64_t first_token_us;
-	char pend[512];      /* 跨 chunk 的 SSE 行缓冲             */
+	char pend[2048];     /* 跨 chunk 的 SSE 行缓冲（V-41 扩容）  */
 	size_t pend_len;
 	char sent[512];      /* 攒句缓冲                            */
 	size_t sent_len;
@@ -120,19 +120,25 @@ static esp_err_t http_event(esp_http_client_event_t *ev)
 				const char *nl = memchr(p, '\n', left);
 
 				if (!nl) {
-					/* 残行入 pend */
-					if (c->pend_len + left >=
-					    sizeof(c->pend)) {
-						c->pend_len = 0;
-					}
+					/* 残行入 pend；超长行（MiniMax
+					 * 关思考末事件 ~700B+）截断尾部，
+					 * 绝不越界写 */
+					size_t cp = left;
+
+					if (cp > sizeof(c->pend) -
+						 c->pend_len - 1)
+						cp = sizeof(c->pend) -
+						     c->pend_len - 1;
 					memcpy(c->pend + c->pend_len, p,
-					       left);
-					c->pend_len += left;
+					       cp);
+					c->pend_len += cp;
 					break;
 				}
 				size_t ll = nl - p;
-				char line[512];
+				char line[2048];
 
+				if (ll >= sizeof(line))
+					ll = sizeof(line) - 1;
 				if (c->pend_len) {
 					size_t cp = c->pend_len;
 
@@ -145,11 +151,9 @@ static esp_err_t http_event(esp_http_client_event_t *ev)
 					handle_line(c, line,
 						    cp + ll);
 				} else {
-					if (ll < sizeof(line)) {
-						memcpy(line, p, ll);
-						line[ll] = '\0';
-						handle_line(c, line, ll);
-					}
+					memcpy(line, p, ll);
+					line[ll] = '\0';
+					handle_line(c, line, ll);
 				}
 				left -= ll + 1;
 				p = nl + 1;
@@ -167,7 +171,7 @@ int llm_stream_chat(const struct llm_cfg *cfg, llm_sent_cb cb,
 {
 	struct llm_ctx c = { .cb = cb, .user = user,
 			   .cut_clauses = cfg->cut_clauses };
-	char auth[192];
+	char auth[768];	/* V-41：MiniMax JWT 约 690B，192 会截断致 401 */
 	char body[1024];
 	int ret;
 	cJSON *root, *msgs, *m;
@@ -177,6 +181,11 @@ int llm_stream_chat(const struct llm_cfg *cfg, llm_sent_cb cb,
 	root = cJSON_CreateObject();
 	cJSON_AddStringToObject(root, "model", cfg->model);
 	cJSON_AddBoolToObject(root, "stream", true);
+	if (cfg->no_think) {
+		cJSON *th = cJSON_AddObjectToObject(root, "thinking");
+
+		cJSON_AddStringToObject(th, "type", "disabled");
+	}
 	msgs = cJSON_AddArrayToObject(root, "messages");
 	if (cfg->system) {
 		m = cJSON_CreateObject();

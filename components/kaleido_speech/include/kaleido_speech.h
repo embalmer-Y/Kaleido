@@ -82,6 +82,9 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms);
 int64_t ks_tts_first_pcm_us(void);
 void ks_tts_close(void);
 
+/* MiniMax：从 JWT key 解析 GroupID（url 拼接用） */
+int ks_mm_group_id(const char *jwt, char *out, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

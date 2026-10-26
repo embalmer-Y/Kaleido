@@ -22,6 +22,7 @@ struct llm_cfg {
 	const char *system;  /* 可为 NULL                            */
 	const char *user_msg;
 	bool cut_clauses;   /* true=子句级（，、）切送 TTS，首音更快 */
+	bool no_think;     /* V-41 MiniMax-M3：body 附 thinking disabled */
 };
 
 /* 阻塞执行一次流式对话；输出 first_token_us（首 delta 时刻，可 NULL） */

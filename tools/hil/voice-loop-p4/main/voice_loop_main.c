@@ -90,9 +90,18 @@ static void on_asr_text(void *user, const char *sentence, bool final)
 	strlcat(s_asr_text, sentence, sizeof(s_asr_text));
 }
 
-/* ---- LLM 句读回调：首句即送 TTS（TTS 已在采音窗内预开） ---- */
+/* ---- LLM 句读回调 → 子句队列（V-41 解嵌套）----
+ * 原实现：on_llm_sentence 在 LLM 的 HTTP 事件回调里直接跑 TTS 的
+ * esp_http_client+TLS——嵌套 TLS 栈深 ~13KB 顶穿主栈/非重入，
+ * 实测 PC 跳进 JSON 数据（Instruction access fault）。改为回调仅
+ * 入队，独立任务喂 TTS；附带收益：LLM 流后续子句与 TTS 取数并行 */
+static QueueHandle_t s_clause_q;
+static SemaphoreHandle_t s_feeder_done;
+#define CLAUSE_ITEM_BYTES 512
 
 static volatile bool s_tts_open;
+static bool s_use_minimax;
+static char s_mm_url[160];
 
 /* M1.5 杠杆：轮开始即后台开 TTS 会话，~2.8s 冷建连藏进采音窗 */
 static void tts_prewarm_task(void *arg)
@@ -108,35 +117,54 @@ static void tts_prewarm_task(void *arg)
 	vTaskDelete(NULL);
 }
 
+static void tts_feeder_task(void *arg)
+{
+	char item[CLAUSE_ITEM_BYTES];
+
+	(void)arg;
+	for (;;) {
+		if (xQueueReceive(s_clause_q, item, portMAX_DELAY) !=
+		    pdTRUE)
+			continue;
+		if (!item[0]) {		/* NULL 哨兵：流结束 */
+			if (s_tts_open) {
+				ks_tts_feed(NULL, true, 15000);
+				s_tts_open = false;
+			}
+			xSemaphoreGive(s_feeder_done);
+			vTaskDelete(NULL);
+			return;
+		}
+		if (!s_tts_open) {
+			ESP_LOGE(TAG, "tts not prewarmed");
+			continue;
+		}
+		if (ks_tts_feed(item, false, 15000) != 0)
+			ESP_LOGW(TAG, "clause feed fail: %.24s", item);
+	}
+}
+
 static bool on_llm_sentence(void *user, const char *sentence,
 			    bool final)
 {
-	(void)user; /* TTS 已在采音窗内预开（M1.5），此处只管投喂 */
+	(void)user; /* TTS 已在采音窗内预开（M1.5），此处只管入队 */
+	static const char eos[CLAUSE_ITEM_BYTES];	/* 全零=流结束哨兵 */
 
 	if (!t_llm_first_clause && sentence[0])
 		t_llm_first_clause = esp_timer_get_time();
 	if (final && !sentence[0]) {
-		if (s_tts_open) {
-			ks_tts_feed(NULL, true, 15000);
-			s_tts_open = false;
-		}
+		xQueueSend(s_clause_q, eos, pdMS_TO_TICKS(200));
 		return true;
 	}
-	if (!s_tts_open) {
-		/* 预开通路径（M1.5）：asr_finish 后立即开好，此处无需再开 */
-		ESP_LOGE(TAG, "tts not prewarmed");
-		return false;
-	}
 	if (!sentence[0])
-		return true; /* 空子句防御：喂了会 task-failed */
-	int rc = ks_tts_feed(sentence, false, 15000);
-
-	if (rc)
+		return true; /* 空子句防御 */
+	if (xQueueSend(s_clause_q, sentence, pdMS_TO_TICKS(200)) !=
+	    pdTRUE) {
+		ESP_LOGW(TAG, "clause q full, drop");
 		return false;
-	if (final) {
-		ks_tts_feed(NULL, true, 15000);
-		s_tts_open = false;
 	}
+	if (final)
+		xQueueSend(s_clause_q, eos, pdMS_TO_TICKS(200));
 	return true;
 }
 
@@ -581,6 +609,15 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	}
 	xTaskCreatePinnedToCore(tts_prewarm_task, "ttspre", 6144, tts, 5,
 				NULL, 0);
+	/* V-41 解嵌套：子句队列 + 独立 TTS 喂送（见 on_llm_sentence 注） */
+	if (!s_clause_q) {
+		s_clause_q = xQueueCreate(8, CLAUSE_ITEM_BYTES);
+		s_feeder_done = xSemaphoreCreateBinary();
+	}
+	xQueueReset(s_clause_q);
+	xSemaphoreTake(s_feeder_done, 0);
+	xTaskCreatePinnedToCore(tts_feeder_task, "ttsfeed", 10240, NULL,
+				5, NULL, 0);
 	/* 边采边喂（产品真实形态：流式）；embedded 模式以 1x 节奏
 	 * 喂内置测试 PCM（无人值守回归） */
 	int64_t cap_start = esp_timer_get_time();
@@ -639,7 +676,8 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	int64_t ftok = 0;
 
 	int rc = llm_stream_chat(llm, on_llm_sentence, tts, &ftok);
-	t_llm_first = ftok;
+	if (!xSemaphoreTake(s_feeder_done, pdMS_TO_TICKS(30000)))
+		ESP_LOGW(TAG, "feeder not done in 30s");
 	ks_tts_close(); /* 消费者异常中断时兜底 */
 	if (rc != 0) {
 		ESP_LOGE(TAG, "llm fail %d", rc);
@@ -678,14 +716,18 @@ void app_main(void)
 		.model = "paraformer-realtime-v2",
 		.sample_rate = 16000,
 	};
+	/* V-41：TTS/LLM 切 MiniMax（ASR 留百炼 paraformer-realtime-v2）。
+	 * 模型选型实测见 docs/research/27：M3 关思考=旗舰质量+首子句 ~0.7s；
+	 * speech-2.5-hd-preview=HD 质量档且首音最快（~0.25s） */
 	static struct ks_tts_cfg tts = {
-		.url = "wss://dashscope.aliyuncs.com",
-		.api_key = CONFIG_VL_DS_KEY,
-		.model = "cosyvoice-v3-flash",
-		.voice = "longanyang",
+		.url = "",
+		.api_key = CONFIG_KS_MM_KEY,
+		.model = CONFIG_KS_TTS_MM_MODEL,
+		.voice = CONFIG_KS_TTS_MM_VOICE,
 		.sample_rate = 16000,
 	};
-	struct llm_cfg llm = {
+	char mm_gid[48];
+	static struct llm_cfg llm = {
 		.url = "https://dashscope.aliyuncs.com/"
 		       "compatible-mode/v1/chat/completions",
 		.api_key = CONFIG_VL_LLM_KEY,
@@ -695,6 +737,20 @@ void app_main(void)
 		.user_msg = "",
 		.cut_clauses = true, /* M1.5：子句级切送，首音不等句号 */
 	};
+	if (ks_mm_group_id(CONFIG_KS_MM_KEY, mm_gid, sizeof(mm_gid)) == 0) {
+		snprintf(s_mm_url, sizeof(s_mm_url),
+			 "https://api.minimaxi.com/v1/text/"
+			 "chatcompletion_v2?GroupId=%s", mm_gid);
+		llm.url = s_mm_url;
+		llm.api_key = CONFIG_KS_MM_KEY;
+		llm.model = "MiniMax-M3";
+		llm.no_think = true;
+		s_use_minimax = true;
+		printf("VL,LLM,MINIMAX,ok,gid_len=%d\n",
+		       (int)strlen(mm_gid));
+	} else {
+		printf("VL,LLM,MINIMAX,fallback_dashscope\r\n");
+	}
 
 	esp_log_level_set("*", ESP_LOG_WARN);
 	nvs_flash_init();
@@ -739,6 +795,26 @@ void app_main(void)
 		}
 		if (ch == 'a' || ch == 'A') {
 			acoustic_round(&asr, &tts, &llm);
+			continue;
+		}
+		if (ch == 'M') {
+			if (s_use_minimax) {
+				llm.url = "https://dashscope.aliyuncs.com/"
+					  "compatible-mode/v1/chat/completions";
+				llm.api_key = CONFIG_VL_LLM_KEY;
+				llm.model = "qwen-plus";
+				llm.no_think = false;
+				s_use_minimax = false;
+			} else {
+				llm.url = s_mm_url;
+				llm.api_key = CONFIG_KS_MM_KEY;
+				llm.model = "MiniMax-M3";
+				llm.no_think = true;
+				s_use_minimax = true;
+			}
+			printf("VL,LLM,PROVIDER,%s\r\n",
+			       s_use_minimax ? "minimax" : "dashscope");
+			fflush(stdout);
 			continue;
 		}
 		if (ch == 'w') {
