@@ -54,6 +54,7 @@
 #include "provision.h"
 #include "sdkconfig.h"
 #include "sdmmc_cmd.h"
+#include "emote_stage.h"
 #include "stage_express.h"
 
 #define CAP_SECONDS	30 /* 负责人要求：真人轮 30s 窗防错过（'t' 内置轮不受影响）*/
@@ -76,7 +77,7 @@
 #define TOUCH_PIN_RST		(GPIO_NUM_NC)
 #define TOUCH_PIN_INT		(GPIO_NUM_NC)
 
-esp_lcd_panel_handle_t lcd_panel = NULL;	/* lottie_stage 读 DPI fb 用 */
+esp_lcd_panel_handle_t lcd_panel = NULL;	/* emote_stage 读 DPI fb 用 */
 static esp_lcd_panel_io_handle_t io_handle;
 static lv_display_t *lvgl_disp;
 #define CAP_CHUNK	1600 /* 100ms @16k              */
@@ -1109,8 +1110,9 @@ void app_main(void)
 	lv_obj_set_style_bg_color(lv_screen_active(),
 				  lv_color_hex(0x101828), 0);
 	lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
-	/* 舞台先建屏（stage_start 内 lv_screen_load），表达环再挂活动屏 */
-	lottie_stage_start();
+	/* 表情舞台先建屏（emote_stage_start 内 lv_screen_load），表达环
+	 * 再挂活动屏——反序会把环留在无人可见的默认屏 */
+	emote_stage_start();
 	stage_express_init();
 	lvgl_port_unlock();
 	/* 深色舞台屏就绪后才开背光：开机全程无白闪（app_lcd_init 已不发
@@ -1175,7 +1177,7 @@ void app_main(void)
 	printf("VL,READY,keys: g=round t=embedded a=acoustic w=wakenet "
 	       "W=wn-selftest c=hands-free n=manual-wake C=auto-soak "
 	       "M=llm-toggle k=web-config o=ap-probe u=stats s=sd p=pa "
-	       "l=loopback (%d menu rounds)\r\n", ROUND_MAX);
+	       "l=loopback e=emote-cycle (%d menu rounds)\r\n", ROUND_MAX);
 	fflush(stdout);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
@@ -1192,6 +1194,11 @@ void app_main(void)
 		}
 		if (ch == 'l' || ch == 'L') {
 			loopback_tone();
+			continue;
+		}
+		if (ch == 'e' || ch == 'E') {
+			/* 猫伴表情轮播（V-45R）：目验 22 片段与切换过渡 */
+			emote_stage_cycle();
 			continue;
 		}
 		/* 互斥门：轮次/声学环回与唤醒自检都会独占 TTS 会话

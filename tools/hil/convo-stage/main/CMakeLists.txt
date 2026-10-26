@@ -1,14 +1,13 @@
-# V-45 合并工程（语音模块自 voice-loop-p4 平移；显示链自 dsi-lvgl 平移）：
+# V-45R 表情舞台（V-45 合并工程；语音模块自 voice-loop-p4 平移）：
 #   convo_stage_main.c  轮编排 + DSI/LVGL 初始化 + 表达桥接线
-#                      ⚠ 2026-10-26 SDIO 二分中被基线版覆盖，待按门禁
-#                        记录 §恢复配方重建（=基线 main + 显示段合并）
-#   stage_express.c     kaleido_express(L0) ↔ 舞台四态视觉桥
-#   lottie_stage.c      角色舞台（thorvg pthread + lv_canvas 合成）
-idf_component_register(SRCS "convo_stage_main.c" "stage_express.c" "lottie_stage.c"
+#   stage_express.c     kaleido_express(L0) ↔ 舞台/表情桥
+#   emote_stage.c       表情舞台（esp_emote_gen_player 猫伴表情包，
+#                       RGB565 画布直写合成；thorvg/lottie 版见 git 历史）
+idf_component_register(SRCS "convo_stage_main.c" "stage_express.c" "emote_stage.c"
                               "audio_io.c" "wakenet_test.c" "provision.c"
                               "clause_pump.c" "convo_fsm.c"
                        INCLUDE_DIRS "."
-                       EMBED_FILES "assets/test_lottie.json" "test_prompt.pcm"
+                       EMBED_FILES "test_prompt.pcm"
                        PRIV_REQUIRES esp_wifi esp_netif esp_event nvs_flash
                                      esp_http_client esp_http_server esp_timer
                                      esp_codec_dev espressif__cjson
@@ -18,4 +17,5 @@ idf_component_register(SRCS "convo_stage_main.c" "stage_express.c" "lottie_stage
                                      esp_lvgl_port lvgl
                                      esp_lcd_jd9366 esp_lcd_touch_jd9366
                                      kaleido_speech kaleido_secret kaleido_express
-                                     fatfs sdmmc espressif__esp-sr)
+                                     fatfs sdmmc espressif__esp-sr
+                                     espressif2022__esp_emote_gen_player)

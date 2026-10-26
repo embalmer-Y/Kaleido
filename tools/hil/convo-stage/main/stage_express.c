@@ -22,6 +22,7 @@
 #include "freertos/task.h"
 
 #include "convo_fsm.h"
+#include "emote_stage.h"
 #include "kaleido_express.h"
 #include "kaleido_secret.h"
 #include "stage_express.h"
@@ -116,13 +117,14 @@ static void bridge_timer_cb(lv_timer_t *t)
 }
 
 /* kex 回调（在 bridge_timer_cb 上下文执行，LVGL 安全）：
- * 转换计数打串口，供门禁判分 */
+ * 转换计数打串口，供门禁判分；表情舞台只入队（锁纪律见 emote_stage.c） */
 static void on_kex_state(void *user, enum kex_state st)
 {
 	(void)user;
 	printf("VL,KEX,%s,n=%d\r\n", kex_state_name(st),
 	       kex_transition_count());
 	fflush(stdout);
+	emote_stage_set_state(st);
 }
 
 int stage_express_init(void)

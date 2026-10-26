@@ -23,7 +23,7 @@
 #include "convo_fsm.h"
 #include "esp_lvgl_port.h"
 #include "kaleido_speech.h"
-#include "lottie_stage.h"
+#include "emote_stage.h"
 
 /* voice_loop_main.c 的 TTS PCM → 扬声器缓冲（s_pb）转发 */
 extern void on_tts_pcm(void *user, const uint8_t *pcm, size_t len);
@@ -166,12 +166,12 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	s_on_wake = on_wake;
 
 	/* V-45 第二阻断隔离包装：死亡点在 srmodel_init/create_from_config
-	 * 且仅显示链活着时发生。加载期间 ①冻结 thorvg 舞台线程 ②持
-	 * LVGL 互斥（干净停掉 LVGL 任务刷新；DPI 扫描仍在跑，恰好把
-	 * "渲染并发"与"扫描并发"两个变量分开——若仍死则凶手在扫描层） */
+	 * 且仅显示链活着时发生。顺序严格：①先停表情动画（同步等 gfx
+	 * 任务 ack，此刻无人再碰 LVGL/PSRAM 渲染）②再持 LVGL 互斥干净
+	 * 停掉 LVGL 刷新。不得反过来（lvgl→gfx 反向嵌套会与 flush_cb
+	 * 的 gfx→lvgl 成 ABBA 死锁——锁纪律见 emote_stage.c 文件头） */
+	emote_stage_pause(true);
 	bool lvgl_held = lvgl_port_lock(2000);
-
-	lottie_stage_freeze(true);
 	printf("VL,WN,STAGE,srmodel_begin\r\n");
 	fflush(stdout);
 	models = esp_srmodel_init("model");
@@ -211,9 +211,9 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 		goto out_unfreeze;
 	}
 out_unfreeze:
-	lottie_stage_freeze(false);
 	if (lvgl_held)
 		lvgl_port_unlock();
+	emote_stage_pause(false);
 	if (!models || models->num == 0 || !s_afe || !s_afe_data)
 		return;
 	printf("VL,WN,INIT,ok,model=%s,int=-%uKB,ps=-%uKB\r\n",

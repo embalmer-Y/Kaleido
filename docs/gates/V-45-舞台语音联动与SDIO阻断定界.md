@@ -178,3 +178,36 @@ int −6KB / PSRAM −393KB）；'W' 9 轮 TTS 播报全过零锁死；'C' 浸�
 - `docs/mem-2026-10-26-内存占用清单.md`（组件/符号/任务栈/台阶/杠杆全表）
 - FB 采样 + VL,HEAP 巡检 + wakenet 分段打印（常驻诊断仪表）
 - 'X' 探针已修安全（持 LVGL 锁再动面板）
+
+---
+
+## 追记 #3（2026-10-27 凌晨）：表情定向落地——esp_emote_gfx + 猫伴表情包
+
+**负责人定向**：表情资产采用 **ESP Emote GFX Packer NEXT**（浏览器打包工具，
+https://emote-gfx-gen-tool-dev.pages.dev/ ，GIF/Lottie→EAF 矢量包），测试期
+使用乐鑫开源**猫伴表情**（`dl.espressif.com/AE/Emote Pack.zip`，23 段 GIF 源
+848²；预编译包 `emote_assets.bin` 5.3MB=22 片段，Apache-2.0）。
+
+**工程落地（convo-stage）**：
+- 组件 `espressif2022/esp_emote_gen_player 0.0.2` + `esp_emote_gfx 3.0.5`
+  （P4 官方支持）；其 CMake 硬性 `REQUIRES json` 由本地垫片组件
+  components/json 转发 cjson 满足（上游变通，零魔改 managed_components）
+- 分区：storage 缩 7MB→1MB（无使用方）让位 `emote_gen`(data/spiffs 6MB
+  @0x920000)，bin 直写该偏移；NVS/model 不动
+- emote_stage.c：flush_cb(RGB565 脏区)持 LVGL 锁直写单张 325² lv_canvas
+  （较 thorvg ARGB 三缓冲省 634KB PSRAM）；**锁纪律成文**（gfx→lvgl 单向，
+  KEX 回调只入队，防 ABBA——V-45 死锁教训的制度化）
+- 尺寸：解析器硬编码 200×150（demo 屏），首帧 update_cb 后 set_size(325²)
+  +居中拉正，且每片段切换自愈重拉（播放器按 index 重置）；tip 标签隐藏
+- KEX 五态映射：question(未配置)/smile(待命)/investigate(听)/ponder(想)/
+  confident(说)；'e' 键轮播 22 片段供目验
+- wakenet 隔离包装迁移：lottie 冻结 → emote_stage_pause（同步 ack，先停
+  动画后持 LVGL 锁）；lottie_stage.c/thorvg 依赖退役（git 历史可溯）
+
+**验证**：MOUNTED clips=22 → CLIP smile → RESIZED 325×325；'e' 轮播四段
+像素随片段真实变化（FB 采样 FFFF↔0000）；'w' 加载全程 rc=0 且恢复后表情
+回位；堆巡检 OK。**待用户目验**：猫伴动画质量/五态映射观感/播报共存。
+
+**遗留**：烧录后首个 boot 曾现一次早期 rst:0x7（二次启动即恢复，未复现；
+若再现按 V-45 追记#2 的取证纪律抓取）；上游回馈项——index.json 的
+width/height 键不被解析器读取（现靠运行期 set_size 变通）。
