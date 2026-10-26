@@ -20,16 +20,19 @@
 #include "model_path.h"
 
 #include "audio_io.h"
+#include "convo_fsm.h"
 #include "kaleido_speech.h"
 
 /* voice_loop_main.c 的 TTS PCM → 扬声器缓冲（s_pb）转发 */
 extern void on_tts_pcm(void *user, const uint8_t *pcm, size_t len);
-void wakenet_start(struct ks_tts_cfg *tts, bool selftest);
+void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
+		   void (*on_wake)(void));
 
 static const esp_afe_sr_iface_t *s_afe;
 static esp_afe_sr_data_t *s_afe_data;
 static volatile bool s_running;		/* 重入守卫：AFE/模型只初始化一次 */
 static volatile bool s_selftest;	/* 'W' 自检进行中（主菜单互斥门用） */
+static void (*s_on_wake)(void);		/* FSM 挂点：唤醒即通知（可 NULL） */
 static volatile int s_wake_cnt;
 static volatile int64_t s_speak_us;	/* TTS 开口时刻（延迟基准） */
 static int16_t s_beep[4800];		/* 300ms 提示音 */
@@ -59,6 +62,13 @@ static void feed_task(void *arg)
 	fflush(stdout);
 	/* 核 0 喂音 / 核 1 检测（创建处绑核）：与 LVGL/网络任务天然错峰 */
 	for (;;) {
+		/* FSM 占麦让渡（V-43）：免按键会话非 IDLE 态不喂麦——轮
+		 * 采集独占麦克风；AEC 落地（V-46）前，自唤醒免疫即由此
+		 * 结构性获得（播放期根本无人听麦）。OFF=FSM 未启，独立
+		 * 'w' 模式照常监听 */
+		while (convo_state_get() != CONVO_OFF &&
+		       convo_state_get() != CONVO_IDLE)
+			vTaskDelay(pdMS_TO_TICKS(50));
 		int n = aio_capture(buf, chunk, 2000);
 
 		/* 采不足一帧补静音：AFE 按固定节拍消费，断流会拖垮
@@ -83,6 +93,8 @@ static void detect_task(void *arg)
 			printf("VL,WN,WAKE,cnt=%d,lat_ms=%lld,vol=%.1f\r\n",
 			       s_wake_cnt, lat, r->data_volume);
 			fflush(stdout);
+			if (s_on_wake)
+				s_on_wake();	/* 通知 FSM（免按键轮起点） */
 			xTaskCreatePinnedToCore(beep_play_task, "beep", 4096,
 						NULL, 6, NULL, 0);
 		}
@@ -128,7 +140,8 @@ bool wakenet_selftest_busy(void)
 	return s_selftest;
 }
 
-void wakenet_start(struct ks_tts_cfg *tts, bool selftest)
+void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
+		   void (*on_wake)(void))
 {
 	uint32_t i0 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 	uint32_t p0 = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
@@ -139,12 +152,16 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest)
 	 * 按新指针跑，双重喂入 + OOM。当前无停止路径（任务常驻到复位），
 	 * 属 M2 状态机工作，这里只保证不重复起 */
 	if (s_running) {
+		/* 已在跑：仅补挂 FSM 回调（'c' 先于 'w' 的启动顺序容忍） */
+		if (on_wake)
+			s_on_wake = on_wake;
 		printf("VL,WN,ALREADY_RUNNING\r\n");
 		fflush(stdout);
 		return;
 	}
 	s_running = true;
 	s_selftest = selftest;
+	s_on_wake = on_wake;
 
 	models = esp_srmodel_init("model");
 
