@@ -52,6 +52,7 @@ static void feed_task(void *arg)
 {
 	int chunk = s_afe->get_feed_chunksize(s_afe_data);
 	int16_t *buf = malloc(chunk * sizeof(int16_t));
+	static uint32_t feed_cur;	/* V-46a：私有采音游标 */
 
 	(void)arg;
 	if (!buf) {
@@ -71,7 +72,7 @@ static void feed_task(void *arg)
 		while (convo_state_get() != CONVO_OFF &&
 		       convo_state_get() != CONVO_IDLE)
 			vTaskDelay(pdMS_TO_TICKS(50));
-		int n = aio_capture(buf, chunk, 2000);
+		int n = aio_capture_stream(buf, chunk, 2000, &feed_cur);
 
 		/* 采不足一帧补静音：AFE 按固定节拍消费，断流会拖垮
 		 * 内部缓冲对齐（宁可喂静音也不饿它） */
@@ -170,7 +171,14 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	 * 任务 ack，此刻无人再碰 LVGL/PSRAM 渲染）②再持 LVGL 互斥干净
 	 * 停掉 LVGL 刷新。不得反过来（lvgl→gfx 反向嵌套会与 flush_cb
 	 * 的 gfx→lvgl 成 ABBA 死锁——锁纪律见 emote_stage.c 文件头） */
-	emote_stage_pause(true);
+	if (!emote_stage_pause(true)) {
+		/* 隔离降级不许静默：记日志后中止本次加载（渲染未停就跑
+		 * 模型加载=重蹈 V-45 缓存维护死锁——宁可让用户重按） */
+		printf("VL,WN,ERROR=emote_pause_timeout\r\n");
+		fflush(stdout);
+		s_running = false;
+		return;
+	}
 	bool lvgl_held = lvgl_port_lock(2000);
 	printf("VL,WN,STAGE,srmodel_begin\r\n");
 	fflush(stdout);

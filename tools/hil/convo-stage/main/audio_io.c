@@ -18,6 +18,8 @@
 #include "esp_codec_dev_defaults.h"
 #include "es8311_codec.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
@@ -47,8 +49,57 @@ i2c_master_bus_handle_t aio_i2c_bus(void)
  * 函数即互相踩写（wakenet 采集 vs 'g' 轮采集；beep vs TTS 播放）。
  * 采集/播放各一把互斥锁串行化（评审 2026-10-26 BUG#4）。
  * 锁语义为"尽力串行"：取锁失败返回 0 样本，调用方按超时处理 */
-static SemaphoreHandle_t s_cap_mux;
 static SemaphoreHandle_t s_play_mux;
+
+/* V-46a 采音所有权重构（V-45 缺陷族治本）：
+ * 历史实现 aio_capture 整个多轮 I2S 读循环持 s_cap_mux——wakenet feed
+ * （优先级 5）紧循环下低优先级消费者（菜单探针）2000ms 拿不到锁，
+ * 实测 'l' capture=0（饿死）；浸泡期 TTS 喊话声学 miss 疑同族。
+ * 现架构：单一采音任务 aio_cap 独占 I2S RX，左声道写 PSRAM 环；
+ * aio_capture 语义不变（顺序流+超时），但退化为"环快照拷出"——
+ * 等待在锁外、拷贝临界区微秒级，饥饿绝迹。V-46c（AEC）的 TX 参考
+ * 环按同构落位即可。
+ *   游标语义：单读游标 r（消费者仍互斥，所有权纪律在调用方/FSM）；
+ *   掉队超过半环（新会话/探针）跳到最新，不吃陈旧积压。 */
+#define AIO_RING_ORDER	17	/* 2^17 采样 = 8.2s @16k */
+#define AIO_RING_MASK	((1u << AIO_RING_ORDER) - 1)
+#define AIO_CAP_CHUNK	320	/* 20ms 立体声帧/写轮 */
+
+static int16_t *s_ring;		/* PSRAM 单声道环 */
+static volatile uint32_t s_w;	/* 写游标（绝对值，单调） */
+static uint32_t s_r;		/* 读游标（消费者互斥下访问） */
+static portMUX_TYPE s_ring_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void cap_task(void *arg)
+{
+	static int16_t st[AIO_CAP_CHUNK * 2]; /* 立体声中转（左=奇? 左=偶） */
+	size_t frames;
+
+	(void)arg;
+	for (;;) {
+		size_t got = 0;
+
+		while (got < sizeof(st)) {
+			size_t n;
+
+			if (i2s_channel_read(s_rx, (char *)st + got,
+					     sizeof(st) - got, &n,
+					     pdMS_TO_TICKS(100)) !=
+			    ESP_OK || n == 0)
+				break;
+			got += n;
+		}
+		frames = got / 4;
+		if (!frames)
+			continue;
+		/* 覆盖写：只推进写游标，落后读者按掉队策略自跳 */
+		portENTER_CRITICAL(&s_ring_mux);
+		for (size_t i = 0; i < frames; i++)
+			s_ring[(s_w + i) & AIO_RING_MASK] = st[2 * i];
+		s_w += frames;
+		portEXIT_CRITICAL(&s_ring_mux);
+	}
+}
 
 int aio_init(void)
 {
@@ -135,10 +186,17 @@ int aio_init(void)
 	s_out = esp_codec_dev_new(&out_cfg);
 	if (!s_in || !s_out)
 		return -4;
-	s_cap_mux = xSemaphoreCreateMutex();
 	s_play_mux = xSemaphoreCreateMutex();
-	if (!s_cap_mux || !s_play_mux)
+	if (!s_play_mux)
 		return -5;
+	/* V-46a：PSRAM 环（256KB/8.2s）。⚠ 采音任务必须最后创建：
+	 * esp_codec_dev_open 会重配 I2S 通道（全双工主从切换），并发
+	 * i2s_channel_read 会与通道重配死锁（实测开机冻结于 i2s_common
+	 * 告警行） */
+	s_ring = heap_caps_malloc((1u << AIO_RING_ORDER) * sizeof(int16_t),
+				  MALLOC_CAP_SPIRAM);
+	if (!s_ring)
+		return -6;
 
 	esp_codec_dev_sample_info_t fs = {
 		.sample_rate = AIO_SR,
@@ -163,45 +221,49 @@ int aio_init(void)
 	}
 	ESP_LOGI(TAG, "es8311 ready (adc+dac, 16k stereo-slot, pa=%d forced)",
 		 AIO_PA_PIN);
+	if (xTaskCreate(cap_task, "aio_cap", 4096, NULL, 5, NULL) != pdPASS)
+		return -7;	/* codec 已起，任务失败由调用方处置 */
 	return 0;
 }
 
-int aio_capture(int16_t *mono, size_t samples, uint32_t timeout_ms)
+int aio_capture_stream(int16_t *mono, size_t samples, uint32_t timeout_ms,
+		       uint32_t *cursor)
 {
-	/* 立体声帧分块采回取左声道（S31 验证过的槽位无关方案） */
-	static int16_t st[3200];
-	size_t got_frames = 0;
+	int64_t deadline = esp_timer_get_time() +
+			   (int64_t)timeout_ms * 1000;
 
-	if (!s_cap_mux ||
-	    xSemaphoreTake(s_cap_mux, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
+	if (!s_ring || !cursor)
 		return 0;
-	while (got_frames < samples) {
-		size_t want = samples - got_frames;
-		size_t need, got = 0;
+	/* 消费者私有游标：无锁读环（写者只覆盖落后整环的数据，游标
+	 * 掉队超半环即自跳最新——调用方因此天然"从现在开始听"） */
+	uint32_t c = *cursor;
+	uint32_t w = s_w;
 
-		if (want > sizeof(st) / 4)
-			want = sizeof(st) / 4;
-		need = want * 4;
-		while (got < need) {
-			size_t n;
+	if (w - c > (1u << (AIO_RING_ORDER - 1)))
+		c = w;
+	size_t want = samples;
 
-			if (i2s_channel_read(s_rx, (char *)st + got,
-					     need - got, &n,
-					     pdMS_TO_TICKS(timeout_ms)) != ESP_OK ||
-			    n == 0)
-				break;
-			got += n;
+	while (w - c < want) {
+		if (esp_timer_get_time() >= deadline) {
+			want = w - c;	/* 超时：有多少给多少 */
+			break;
 		}
-		size_t f = got / 4;
-
-		for (size_t i = 0; i < f; i++)
-			mono[got_frames + i] = st[2 * i];
-		got_frames += f;
-		if (f < want)
-			break; /* 超时/断流 */
+		vTaskDelay(pdMS_TO_TICKS(2));
+		w = s_w;
+		if (w - c > (1u << (AIO_RING_ORDER - 1)))
+			c = w;		/* 写者已绕圈覆盖：跳最新 */
 	}
-	xSemaphoreGive(s_cap_mux);
-	return got_frames;
+	for (size_t off = 0; off < want; ) {
+		uint32_t pos = (c + off) & AIO_RING_MASK;
+		size_t n = want - off;
+
+		if (n > (uint32_t)(AIO_RING_MASK + 1) - pos)
+			n = (uint32_t)(AIO_RING_MASK + 1) - pos;
+		memcpy(mono + off, s_ring + pos, n * sizeof(int16_t));
+		off += n;
+	}
+	*cursor = c + want;
+	return want;
 }
 
 int aio_play(const int16_t *mono, size_t samples, uint32_t timeout_ms)

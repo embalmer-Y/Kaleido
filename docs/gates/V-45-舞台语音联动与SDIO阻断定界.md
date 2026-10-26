@@ -211,3 +211,34 @@ https://emote-gfx-gen-tool-dev.pages.dev/ ，GIF/Lottie→EAF 矢量包），测
 **遗留**：烧录后首个 boot 曾现一次早期 rst:0x7（二次启动即恢复，未复现；
 若再现按 V-45 追记#2 的取证纪律抓取）；上游回馈项——index.json 的
 width/height 键不被解析器读取（现靠运行期 set_size 变通）。
+
+---
+
+## 追记 #4（2026-10-27）：评审整改 + ASR 悬垂指针修复 + 采音所有权重构（V-46a 提前落地）
+
+**评审（子智能体，7/10）整改**：①emote 任务直改 gfx 对象补持
+`gfx_emote_lock`（渲染竞态）；②`emote_stage_pause` 返回 ack 状态，
+wakenet 隔离超时显式报错中止（不再静默降级）；③'e' 小写化（大写 'E'
+双 TLS 探针解遮蔽）；④resize 改为**切换后一次性**执行（初版做成每帧
+事件驱动 → resize→invalidate→渲染→帧事件自旋闭环把整机 CPU 饿死——
+两个新教训入注释）；⑤acoustic_round 漏 free 修复；⑥json 垫片去符号
+链接（纯 CMake 公共传播）；⑦文档/残留同步（stage_express.h 声明、
+sdkconfig thorvg 行、内存清单任务表、计划 §4）。
+
+**ASR 悬垂指针（V-45 期间 asr_open 真凶）**：`wc.uri = host` 的 host
+为块作用域栈数组，出块即死；esp_websocket_client 1.8.0 解析晚于栈帧
+复用 → **把 Authorization 头串当 URI 解析**（开 ws/transport 日志后
+日志实锤）。合并重建时引入的回归（V-42~44 无此写法）。修复：uri/auth
+堆持有随会话生命周期。修后 't' 全链复通（ASR 转写全文→LLM→TTS），
+'C' 浸泡 **11/11 轮 rc=0 零复位**（wake_hits=1/10 声学命中）。
+
+**V-46a 采音所有权重构（audio_io，调用方零语义变化）**：常驻 aio_cap
+任务独占 I2S RX 写 PSRAM 环（2^17 采样/8.2s）；`aio_capture_stream`
+带消费者私有游标——独立取流互不偷数据，掉队超半环自跳最新。
+**三次实测迭代**（全部入注释成教训）：等待持锁内→仍饿死；共享游标→
+大读者只捡屑（128 采样）；独立游标+锁外等待→**'w' 常驻时 'l' 47.7dB
+PASS**（重构前 capture=0）。另修 cap_task 创建时序（与 codec open 的
+I2S 通道重配并发死锁，开机冻结）。新架构下 'C' 浸泡 7/7 rc=0 无回归。
+
+**V-45 状态**：四态 soak 判据达成（11/11 + 7/7），收口仅余用户目验
+（猫伴五态/动画质量）。V-46b/c（AEC 参考环/打断）地基已就位。

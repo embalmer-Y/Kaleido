@@ -122,6 +122,8 @@ static int rms_i16(const int16_t *p, size_t n)
 static size_t listen_capture(int64_t *speech_ms_out)
 {
 	static int16_t chunk[VAD_CHUNK];
+	static uint32_t vad_cur;	/* V-46a：私有采音游标（跨轮连续，
+					 * 首读掉队自跳最新） */
 	int64_t t0 = esp_timer_get_time();
 	int64_t speech_at = 0;
 	int64_t silence_at = 0;
@@ -138,7 +140,7 @@ static size_t listen_capture(int64_t *speech_ms_out)
 
 		if (el >= LISTEN_MAX_MS * 1000)
 			break;
-		n = aio_capture(chunk, VAD_CHUNK, 500);
+		n = aio_capture_stream(chunk, VAD_CHUNK, 500, &vad_cur);
 		if (n <= 0)
 			break;
 		r = rms_i16(chunk, n);

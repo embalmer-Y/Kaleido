@@ -14,9 +14,10 @@
  *   LVGL 任务：   只碰 lvgl
  *   KEX 回调运行于 LVGL 上下文——只入队，绝不直呼 gfx API（防 lvgl→gfx 反向嵌套）
  *
- * 尺寸注：player 解析器给每个片段硬编码 200×150（demo 屏口径），首帧事件
- * 后由 emote 任务 set_size(325,325)+居中拉正（上游 0.0.2 不解析 index 的
- * width/height 键，已列 V-47 上游回馈项）。
+ * 尺寸注：player 解析器给每个片段硬编码 200×150（demo 屏口径）且每次
+ * anim_now 都按 index 重置——每次切换后由 emote 任务持 gfx 锁一次性
+ * set_size(325,325)+居中拉正（resize_after_switch）。上游 0.0.2 不解析
+ * index 的 width/height 键，已列 V-47 上游回馈项。
  */
 #include <stdio.h>
 #include <string.h>
@@ -33,6 +34,7 @@
 
 #include "emote_gen_player.h"
 #include "esp_lvgl_port.h"
+#include "core/gfx_core.h"
 #include "core/gfx_obj.h"
 #include "widget/gfx_anim.h"
 
@@ -53,9 +55,8 @@ static emote_gen_player_handle_t s_player;
 static QueueHandle_t s_q;
 static SemaphoreHandle_t s_pause_ack;
 
-/* update_cb 缓存的动画对象（首帧事件送达，用于一次性尺寸拉正） */
-static const void *s_anim_obj;
-static volatile bool s_need_resize;
+/* update_cb 缓存的动画对象（每帧事件刷新；resize 专用） */
+static const void *volatile s_anim_obj;
 
 /* ---- KEX 五态 → 猫伴片段（index.json 实名，含尾下划线） ---- */
 static const struct {
@@ -68,6 +69,8 @@ static const struct {
 	{ KEX_THINKING,     "ponder_05s" },	/* 在想：思考 */
 	{ KEX_SPEAKING,     "confident_08" },	/* 在说：自信 */
 };
+
+static void resize_after_switch(void);
 
 /* ---- 消息（全部经队列进 emote 任务执行） ---- */
 enum msg_type { MSG_STATE, MSG_CYCLE, MSG_PAUSE, MSG_RESUME };
@@ -103,6 +106,7 @@ static void emote_task(void *arg)
 						s_player, "smile_05s", true);
 				printf("VL,EMOTE,CLIP,%s\r\n", kex_clip[i].clip);
 				fflush(stdout);
+				resize_after_switch();
 				break;
 			}
 			break;
@@ -121,46 +125,62 @@ static void emote_task(void *arg)
 			printf("VL,EMOTE,CLIP,%s\r\n",
 			       e ? e->name : "?");
 			fflush(stdout);
+			resize_after_switch();
 			break;
 		}
 		case MSG_PAUSE:
 			if (!paused) {
 				paused = true;
+				/* gfx 锁必持：渲染任务此刻可能正在 tick 同一
+				 * 对象（评审#1——多字段状态竞态） */
+				gfx_emote_lock(emote_gen_player_get_gfx_handle(
+							s_player));
 				if (s_anim_obj)
 					gfx_anim_stop((gfx_obj_t *)s_anim_obj);
+				gfx_emote_unlock(emote_gen_player_get_gfx_handle(
+							 s_player));
 			}
 			xSemaphoreGive(s_pause_ack);
 			break;
-		case MSG_RESUME:
-			if (paused) {
-				struct msg idle = { .type = MSG_STATE,
-						    .st = KEX_IDLE };
+		case MSG_RESUME: {
+			struct msg idle = { .type = MSG_STATE,
+					    .st = KEX_IDLE };
 
+			if (paused) {
 				paused = false;
+				gfx_emote_lock(emote_gen_player_get_gfx_handle(
+							s_player));
 				if (s_anim_obj)
 					gfx_anim_start((gfx_obj_t *)s_anim_obj);
+				gfx_emote_unlock(emote_gen_player_get_gfx_handle(
+								 s_player));
 				xQueueSend(s_q, &idle, 0);
 			}
 			break;
 		}
-		/* 首帧已出：一次性拉正尺寸并隐藏 tip 标签（播放器会
-		 * 在舞台顶部显示片段名，产品形态不需要） */
-		if (s_need_resize && s_anim_obj) {
-			gfx_obj_set_size((gfx_obj_t *)s_anim_obj,
-					 STAGE_W, STAGE_H);
-			gfx_obj_align((gfx_obj_t *)s_anim_obj,
-				      GFX_ALIGN_CENTER, 0, 0);
-			gfx_obj_t *tip =
-				emote_gen_player_get_tip_label(s_player);
-
-			if (tip)
-				gfx_obj_set_visible(tip, false);
-			s_need_resize = false;
-			printf("VL,EMOTE,RESIZED,%dx%d\r\n", STAGE_W,
-			       STAGE_H);
-			fflush(stdout);
 		}
 	}
+}
+
+/* 切换后一次性拉正：播放器每次 anim_now 都按 index 重置 200×150，
+ * 须在每次切换后补 set_size(325²)+居中并隐藏 tip 标签（播放器会在
+ * 舞台顶部显示片段名，产品形态不需要）。持 gfx 锁改对象（评审#1） */
+static void resize_after_switch(void)
+{
+	gfx_handle_t gh = emote_gen_player_get_gfx_handle(s_player);
+
+	if (!s_anim_obj)
+		return;
+	gfx_emote_lock(gh);
+	gfx_obj_set_size((gfx_obj_t *)s_anim_obj, STAGE_W, STAGE_H);
+	gfx_obj_align((gfx_obj_t *)s_anim_obj, GFX_ALIGN_CENTER, 0, 0);
+	gfx_obj_t *tip = emote_gen_player_get_tip_label(s_player);
+
+	if (tip)
+		gfx_obj_set_visible(tip, false);
+	gfx_emote_unlock(gh);
+	printf("VL,EMOTE,RESIZED,%dx%d\r\n", STAGE_W, STAGE_H);
+	fflush(stdout);
 }
 
 /* ---- gfx 回调（渲染任务上下文） ---- */
@@ -192,11 +212,13 @@ static void stage_update_cb(gfx_disp_event_t event, const void *obj,
 			    emote_gen_player_handle_t mgr)
 {
 	(void)mgr;
+	/* 只缓存对象指针，不做任何 gfx 变更/入队：帧事件每帧都来，
+	 * 若在此驱动 resize 会形成 resize→invalidate→渲染→帧事件的
+	 * 自旋闭环，把整机 CPU 饿死（V-46a 实测教训）。拉正时机=
+	 * 切换动作后一次性执行（见 emote_task） */
 	if (obj && (event == GFX_DISP_EVENT_ONE_FRAME_DONE ||
-		    event == GFX_DISP_EVENT_ALL_FRAME_DONE)) {
+		    event == GFX_DISP_EVENT_ALL_FRAME_DONE))
 		s_anim_obj = obj;
-		s_need_resize = true;
-	}
 }
 
 /* ---- 心跳：STAT + FB 采样 + 堆巡检（V-45 取证仪表自 lottie_stage 移植） ---- */
@@ -249,18 +271,19 @@ void emote_stage_cycle(void)
 		xQueueSend(s_q, &m, 0);
 }
 
-void emote_stage_pause(bool paused)
+/* 返回 true=暂停已确认（gfx 渲染停）。false=ack 超时——渲染可能仍在
+ * 跑，调用方（wakenet 隔离）必须显式记日志决策，不许静默降级 */
+bool emote_stage_pause(bool paused)
 {
 	if (!s_q)
-		return;
+		return !paused;
 	struct msg m = { .type = paused ? MSG_PAUSE : MSG_RESUME, .st = 0 };
 
 	xSemaphoreTake(s_pause_ack, 0);		/* 清残留 */
 	xQueueSend(s_q, &m, portMAX_DELAY);
-	/* PAUSE 需确认 gfx 任务真的停下（wakenet 隔离要求）；
-	 * RESUME 无需等待 */
-	if (paused)
-		xSemaphoreTake(s_pause_ack, pdMS_TO_TICKS(1000));
+	if (!paused)
+		return true;
+	return xSemaphoreTake(s_pause_ack, pdMS_TO_TICKS(1000)) == pdTRUE;
 }
 
 int emote_stage_start(void)
@@ -333,7 +356,9 @@ int emote_stage_start(void)
 
 	printf("VL,EMOTE,MOUNTED,clips=%d\r\n", (int)n);
 	fflush(stdout);
-	emote_gen_player_anim_now_name(s_player, "smile_05s", true);
+	/* 首播走队列（此刻 app_main 持 LVGL 锁，emote 任务里切播+拉正
+	 * 才符合锁序；kex idle 回调稍后也会入队，幂等） */
+	emote_stage_set_state(KEX_IDLE);
 
 	s_stat_timer = lv_timer_create(stat_timer_cb, 1500, NULL);
 	return 0;

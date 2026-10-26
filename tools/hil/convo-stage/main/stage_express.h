@@ -8,6 +8,5 @@
 
 /* 建 UI（状态环）+ 起 100ms 轮询定时器。须在 LVGL 锁内调用 */
 int stage_express_init(void);
-int lottie_stage_start(void);
 
 #endif

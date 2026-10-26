@@ -14,8 +14,9 @@ void emote_stage_set_state(enum kex_state st);
 /* 'e' 键：循环播放下一个片段（人工目验用） */
 void emote_stage_cycle(void);
 
-/* 暂停/恢复动画渲染（同步等待 ack）。
+/* 暂停/恢复动画渲染。返回：暂停是否已确认（ack≤1s；false=渲染可能
+ * 仍在跑，调用方须记日志并自决继续/中止——不得静默）。
  * 用途：wakenet 加载隔离（V-45 死锁教训）——先暂停 gfx 渲染再持 LVGL 锁 */
-void emote_stage_pause(bool paused);
+bool emote_stage_pause(bool paused);
 
 #endif

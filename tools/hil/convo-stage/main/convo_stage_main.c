@@ -222,7 +222,9 @@ static void pa_polarity_probe(void)
 		vTaskDelay(pdMS_TO_TICKS(50));
 		xTaskCreatePinnedToCore(tone_play_task, "tone", 4096, tone,
 					6, NULL, 0);
-		if (aio_capture(capbuf, 16000, 3000) != 16000) {
+		uint32_t cur_p = 0;	/* 探针私有游标（单次会话） */
+
+		if (aio_capture_stream(capbuf, 16000, 3000, &cur_p) != 16000) {
 			printf("VL,P,lvl=%d,capture_fail\r\n", lvl);
 			fflush(stdout);
 			continue;
@@ -363,7 +365,8 @@ static void loopback_tone(void)
 				    sinf(2.0f * (float)M_PI * 1000.0f *
 					 (float)i / 16000.0f));
 
-	int n_noise = aio_capture(silence, 16000, 2000);
+	uint32_t cur_l = 0;	/* 探针私有游标（单次会话） */
+	int n_noise = aio_capture_stream(silence, 16000, 2000, &cur_l);
 
 	if (n_noise != 16000) {
 		printf("VL,L,FAIL,capture_noise=%d\r\n", n_noise);
@@ -374,7 +377,7 @@ static void loopback_tone(void)
 
 	xTaskCreatePinnedToCore(tone_play_task, "tone", 4096, tone, 6,
 				NULL, 0);
-	int n_sig = aio_capture(capbuf, 16000, 3000);
+	int n_sig = aio_capture_stream(capbuf, 16000, 3000, &cur_l);
 
 	if (n_sig != 16000) {
 		printf("VL,L,FAIL,capture_sig=%d\r\n", n_sig);
@@ -420,12 +423,13 @@ static void tts_listen_task(void *arg)
 {
 	/* 采音窗 32KB 运行期 PSRAM（原静态 .bss，V-45 内存清单整改） */
 	int16_t *win = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
+	static uint32_t win_cur;	/* 探针私有游标 */
 
 	(void)arg;
 	if (!win)
 		vTaskDelete(NULL);
 	while (esp_timer_get_time() < s_listen_end) {
-		int n = aio_capture(win, 16000, 1500);
+		int n = aio_capture_stream(win, 16000, 1500, &win_cur);
 
 		if (n <= 0)
 			break;
@@ -461,8 +465,10 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	int16_t *noise = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
 
 	if (!noise)
-		return;
-	if (aio_capture(noise, 16000, 2000) == 16000)
+		goto out;	/* cap 已分配，走统一释放（评审 BUG 泄漏） */
+	uint32_t cur_a = 0;	/* 声学轮私有游标 */
+
+	if (aio_capture_stream(noise, 16000, 2000, &cur_a) == 16000)
 		rms_noise = rms_i16(noise, 16000);
 	heap_caps_free(noise);
 
@@ -476,7 +482,7 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 				NULL, 0);
 
 	while (got < total) {
-		int n = aio_capture(chunk, CAP_CHUNK, 1000);
+		int n = aio_capture_stream(chunk, CAP_CHUNK, 1000, &cur_a);
 
 		if (n <= 0)
 			break;
@@ -900,9 +906,12 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		printf("VL,LIVE,beep=speak now %ds\r\n", CAP_SECONDS);
 		fflush(stdout);
 		aio_play(cue, 3200, 1000);
+		static uint32_t cur_g;	/* 'g' 轮私有游标（跨轮连续） */
+
 		while (esp_timer_get_time() - cap_start <
 		       CAP_SECONDS * 1000000LL) {
-			int n = aio_capture(chunk, CAP_CHUNK, 500);
+			int n = aio_capture_stream(chunk, CAP_CHUNK, 500,
+						   &cur_g);
 
 			if (n <= 0)
 				break;
@@ -1075,6 +1084,10 @@ void app_main(void)
 	};
 
 	esp_log_level_set("*", ESP_LOG_WARN);
+	/* ASR WS 取证（V-45 遗留：asr open fail 无组件层日志） */
+	esp_log_level_set("websocket_client", ESP_LOG_INFO);
+	esp_log_level_set("transport_base", ESP_LOG_INFO);
+	esp_log_level_set("transport_ssl", ESP_LOG_INFO);
 	nvs_flash_init();
 	esp_netif_init();
 	esp_event_loop_create_default();
@@ -1112,7 +1125,8 @@ void app_main(void)
 	lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
 	/* 表情舞台先建屏（emote_stage_start 内 lv_screen_load），表达环
 	 * 再挂活动屏——反序会把环留在无人可见的默认屏 */
-	emote_stage_start();
+	if (emote_stage_start() != 0)
+		ESP_LOGE(TAG, "emote stage fail（仅表达环可用）");
 	stage_express_init();
 	lvgl_port_unlock();
 	/* 深色舞台屏就绪后才开背光：开机全程无白闪（app_lcd_init 已不发
@@ -1196,8 +1210,9 @@ void app_main(void)
 			loopback_tone();
 			continue;
 		}
-		if (ch == 'e' || ch == 'E') {
-			/* 猫伴表情轮播（V-45R）：目验 22 片段与切换过渡 */
+		if (ch == 'e') {
+			/* 猫伴表情轮播（V-45R）：目验 22 片段与切换过渡。
+			 * 大写 'E' 保留给 V-44a 双 TLS 探针，勿再遮蔽 */
 			emote_stage_cycle();
 			continue;
 		}

@@ -162,6 +162,8 @@ out:
 
 struct ks_asr_sess {
 	char task_id[33];
+	char *uri;	/* 堆持有：esp_websocket init/late-parse 都会读 */
+	char *auth;
 	esp_websocket_client_handle_t ws;
 	SemaphoreHandle_t connected;
 	SemaphoreHandle_t started;
@@ -250,22 +252,25 @@ int ks_asr_open(const struct ks_asr_cfg *cfg,
 	if (!s_asr->connected || !s_asr->started || !s_asr->finished)
 		goto fail;
 
-	/* uri 去尾部路径，拼标准 inference 端点（容错首尾 '/'）；
-	 * esp_websocket_client 在 init 时 strdup 配置串，栈上缓冲安全 */
+	/* uri 去尾部路径，拼标准 inference 端点（容错首尾 '/'）。
+	 * ⚠ 必须堆持有：组件 1.8.0 的解析晚于本函数栈帧（V-45 实锤：
+	 * 栈缓冲出块复用后，init 把 Authorization 头串当 URI 解析） */
 	{
-		char host[192];
 		size_t n = strlen(cfg->url);
 
 		while (n && cfg->url[n - 1] == '/')
 			n--;
-		strlcpy(host, cfg->url, n + 1 > sizeof(host) ?
-			sizeof(host) : n + 1);
-		strlcat(host, KS_URI_PATH, sizeof(host));
-		wc.uri = host;
+		s_asr->uri = malloc(n + sizeof(KS_URI_PATH));
+		s_asr->auth = malloc(sizeof(auth));
+		if (!s_asr->uri || !s_asr->auth)
+			goto fail;
+		memcpy(s_asr->uri, cfg->url, n);
+		memcpy(s_asr->uri + n, KS_URI_PATH, sizeof(KS_URI_PATH));
+		snprintf(s_asr->auth, sizeof(auth),
+			 "Authorization: Bearer %s\r\n", cfg->api_key);
+		wc.uri = s_asr->uri;
+		wc.headers = s_asr->auth;
 	}
-	snprintf(auth, sizeof(auth), "Authorization: Bearer %s\r\n",
-		 cfg->api_key);
-	wc.headers = auth;
 
 	s_asr->ws = esp_websocket_client_init(&wc);
 	if (!s_asr->ws)
@@ -381,6 +386,8 @@ void ks_asr_close(void)
 	vSemaphoreDelete(s_asr->connected);
 	vSemaphoreDelete(s_asr->started);
 	vSemaphoreDelete(s_asr->finished);
+	free(s_asr->uri);
+	free(s_asr->auth);
 	free(s_asr);
 	s_asr = NULL;
 }
