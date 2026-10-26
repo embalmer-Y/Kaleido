@@ -5,3 +5,6 @@ dependencies:
   espressif/esp_websocket_client: "^1.8"
   # WiFi 走 C5：host 组件版本必须与板上预烧 slave 固件严格同版（26 号 §2）
   espressif/esp_hosted: "2.12.9"
+
+  # WakeNet 单麦唤醒（M2 前置）
+  espressif/esp-sr: "2.6.0"

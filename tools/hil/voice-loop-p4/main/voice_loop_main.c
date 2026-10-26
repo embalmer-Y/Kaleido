@@ -51,6 +51,8 @@ static StreamBufferHandle_t s_pb;
  * （负责人听感报告）。扩到 PSRAM 768KB（≈24s 回复全容纳）+ 100ms 背压 */
 #define PB_BYTES	786432
 
+void wakenet_start(struct ks_tts_cfg *tts, bool selftest);
+
 static void play_task(void *arg)
 {
 	static int16_t mono[1600]; /* 100ms 单块 */
@@ -68,7 +70,7 @@ static void play_task(void *arg)
 	}
 }
 
-static void on_tts_pcm(void *user, const uint8_t *pcm, size_t len)
+void on_tts_pcm(void *user, const uint8_t *pcm, size_t len)
 {
 	if (!t_tts_first_pcm)
 		t_tts_first_pcm = esp_timer_get_time();
@@ -718,7 +720,7 @@ void app_main(void)
 	}
 	xTaskCreatePinnedToCore(play_task, "pb", 4096, NULL, 5, NULL, 0);
 
-	printf("VL,READY,press 'g'+Enter to run a round\r\n");
+	printf("VL,READY,g=round a=acoustic w=wakenet W=wn-selftest\r\n");
 	fflush(stdout);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
@@ -737,6 +739,22 @@ void app_main(void)
 		}
 		if (ch == 'a' || ch == 'A') {
 			acoustic_round(&asr, &tts, &llm);
+			continue;
+		}
+		if (ch == 'w') {
+			wakenet_start(&tts, false);
+			continue;
+		}
+		if (ch == 'u') {
+			static char stats[4096];
+
+			vTaskGetRunTimeStats(stats);
+			printf("%s\r\n", stats);
+			fflush(stdout);
+			continue;
+		}
+		if (ch == 'W') {
+			wakenet_start(&tts, true);
 			continue;
 		}
 		if (ch != 'g' && ch != 'G' && ch != 't' && ch != 'T')
