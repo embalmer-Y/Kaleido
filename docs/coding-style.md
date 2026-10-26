@@ -5,7 +5,7 @@
 | v1.0 | 2026-10-25 | constraints.md §6.3（v0.3，负责人指示）；基准 Documentation/process/coding-style.rst（Linux 内核） |
 
 **事实源声明**：本文是 Kaleido 全部 C 代码的编码规范事实源；与内核文档冲突处以本文为准（适配项均已标注"豁免"）。
-工具链：仓库根 `.clang-format`（内核预设）由 CI 强制；`clang-format -i` 全量格式化为提交前置。
+工具链：仓库根 `.clang-format`（内核预设）。CI 强制**尚未建成**（登记待办）；现阶段以提交纪律执行：新改动的文件须过 `clang-format -i`，全量格式化走独立提交。
 
 ---
 
@@ -93,6 +93,6 @@
 内核惯例是按子系统取短前缀。Kaleido 各组件采用组件级前缀：
 `ks_`(speech) `ke_`(emotion) `ki_`(ignition) `km_`(memory) `kp_`(persona)
 `kapp_`(app) —— 与内核 `dev_`/`clk_` 同构，**修订规范：组件级短前缀合规**；
-`kd_` 保留给 BSP。头文件守卫一律 `#ifndef`（本批已全量转换）。
+`kd_` 保留给 BSP。头文件守卫一律 `#ifndef`（存量仅剩 `kaleido_app.h` 用 `#pragma once`，按 §5 既有文件豁免保留）。
 80 列口径：代码与注释按显示宽（CJK=2）计，存量超宽随 clang-format
 批处理收敛（登记后续项）。

@@ -24,10 +24,10 @@
 
 ## 沉淀
 
-1. LVGL 9.4 **无内置中文字体**（simsun 是 v8 的）：CJK 子集字体流水线（lv_font_conv）是未来对话文本上屏的前置项，已登记
+1. LVGL 9.4 **无内置中文字体**（勘误 2026-10-26：v8 的 simsun 已移除，但 v9 Kconfig 仍可选思源黑体 SC 子集 `LV_FONT_SOURCE_HAN_SANS_SC_14/16_CJK`，容量/字符集有限）：对话文本上屏若需完整 CJK 子集，自定流水线（lv_font_conv）仍是前置项，已登记
 2. `sdkconfig.defaults` 不会回灌已生成的 sdkconfig——新 Kconfig 项要同时写入两者
 3. LVGL 9.x `lv_timer_t` 结构在私有头里，回调内不要解引用 timer 指针（跨任务传参用文件级静态）
-4. 间歇性启动挂死（串口开口复位后 0.7s 内挂死→HW WDT 二次启动）持续存在，约每次开口复位有概率触发；跑稳后不再复发。B-2 类，待根因（疑似 Boya flash QIO@80MHz 启动时序）
+4. 间歇性启动挂死（串口开口复位后 0.7s 内挂死→HW WDT 二次启动）持续存在，约每次开口复位有概率触发；跑稳后不再复发。B-2 类，待根因。（勘误 2026-10-26：初稿疑点"Boya flash QIO@80MHz 启动时序"已被 V-38 §3.2 勘误推翻——Boya 驱动归因是符号拼错的安慰剂，generic + QIO@80MHz 实测稳定；见 ../docs/gates/V-38）
 
 ## 状态
 

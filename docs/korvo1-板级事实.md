@@ -1,5 +1,10 @@
 # ESP32-S31-Korvo-1 V1.1 板级事实（固件适配用）
 
+> **存档（2026-10-25 D-8 平台切换）**：主开发板已换 osptek P4C5（ESP32-P4），
+> Korvo-1 因 flash 物理故障返修（W-7）不再是现行目标板。本文硬件事实仍有效，
+> 但"BSP 以此为准 / M1 计划"等表述仅存档；现行板级事实见
+> `../docs/gates/V-38-P4C5点板与平台切换实测.md`。
+
 > 来源：esp-claw 板级定义（vendor/esp-claw/application/edge_agent/boards/espressif/esp32_s31_korvo1/，钉版 9b23c15）+ G1 报告 15 附节。
 > 提取日期：2026-10-24。BSP 实现（kaleido_bsp korvo1）以此为准，与官方 schematic 冲突时以后者为准并回改本文件。
 
