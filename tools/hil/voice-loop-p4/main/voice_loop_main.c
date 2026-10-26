@@ -32,8 +32,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
+#include "kaleido_secret.h"
 #include "kaleido_speech.h"
 #include "nvs_flash.h"
+#include "provision.h"
 #include "sdkconfig.h"
 #include "sdmmc_cmd.h"
 
@@ -582,22 +584,20 @@ out:
 	free(cap);
 }
 
-/* ---- WiFi（M1 已验证路径，最简 station） ---- */
-
-static void wifi_start(void)
+/* ---- WiFi（M1 已验证路径，最简 station）----
+ * 凭据走取值链 NVS → CONFIG（HIL 开发后备）；netif/事件环由 app_main
+ * 先行初始化（OOBE 的 SoftAP 分支也依赖） */
+static void wifi_start(const char *ssid, const char *pass)
 {
-	esp_netif_init();
-	esp_event_loop_create_default();
-	esp_netif_create_default_wifi_sta();
 	wifi_init_config_t w = WIFI_INIT_CONFIG_DEFAULT();
-
-	ESP_ERROR_CHECK(esp_wifi_init(&w));
-	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 	wifi_config_t wc = { 0 };
 
-	strlcpy((char *)wc.sta.ssid, CONFIG_VL_WIFI_SSID,
-		sizeof(wc.sta.ssid));
-	strlcpy((char *)wc.sta.password, CONFIG_VL_WIFI_PASS,
+	/* 返回 netif 指针（非 esp_err_t，勿包 ESP_ERROR_CHECK） */
+	esp_netif_create_default_wifi_sta();
+	ESP_ERROR_CHECK(esp_wifi_init(&w));
+	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+	strlcpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
+	strlcpy((char *)wc.sta.password, pass,
 		sizeof(wc.sta.password));
 	ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
 	ESP_ERROR_CHECK(esp_wifi_start());
@@ -753,11 +753,34 @@ out:
 	return rc;
 }
 
+/* ---- 凭据取值链（V-42 OOBE）：NVS → CONFIG（HIL 开发后备）→ 空 ---- */
+static char s_wifi_ssid[33];
+static char s_wifi_pass[64];
+static char s_ds_key[256];	/* 百炼 ASR key */
+static char s_mm_key_buf[768];	/* MiniMax JWT（~690B） */
+
+static void creds_resolve(void)
+{
+	ksec_get_fallback(KSEC_KEY_WIFI_SSID, CONFIG_VL_WIFI_SSID,
+			  s_wifi_ssid, sizeof(s_wifi_ssid));
+	ksec_get_fallback(KSEC_KEY_WIFI_PASS, CONFIG_VL_WIFI_PASS,
+			  s_wifi_pass, sizeof(s_wifi_pass));
+	ksec_get_fallback(KSEC_KEY_DS, CONFIG_VL_DS_KEY, s_ds_key,
+			  sizeof(s_ds_key));
+	ksec_get_fallback(KSEC_KEY_MM, CONFIG_KS_MM_KEY, s_mm_key_buf,
+			  sizeof(s_mm_key_buf));
+	printf("VL,OOBE,nvs_mask=0x%x,wifi=%s,asr=%s,llm=%s\r\n",
+	       ksec_state(),
+	       s_wifi_ssid[0] ? "y" : "n",
+	       s_ds_key[0] ? "y" : "n",
+	       s_mm_key_buf[0] ? "y" : "n");
+	fflush(stdout);
+}
+
 void app_main(void)
 {
-	struct ks_asr_cfg asr = {
+	static struct ks_asr_cfg asr = {
 		.url = "wss://dashscope.aliyuncs.com",
-		.api_key = CONFIG_VL_DS_KEY,
 		.model = "paraformer-realtime-v2",
 		.sample_rate = 16000,
 	};
@@ -766,7 +789,6 @@ void app_main(void)
 	 * speech-2.5-hd-preview=HD 质量档且首音最快（~0.25s） */
 	static struct ks_tts_cfg tts = {
 		.url = "",
-		.api_key = CONFIG_KS_MM_KEY,
 		.model = CONFIG_KS_TTS_MM_MODEL,
 		.voice = CONFIG_KS_TTS_MM_VOICE,
 		.sample_rate = 16000,
@@ -774,7 +796,6 @@ void app_main(void)
 	static struct ks_llm_cfg llm = {
 		.url = "https://dashscope.aliyuncs.com/"
 		       "compatible-mode/v1/chat/completions",
-		.api_key = CONFIG_VL_LLM_KEY,
 		.model = "qwen-plus",
 		.system = "你是桌搭小生物墨墨，口语化短句回答，每句不超过"
 			  "30个字。",
@@ -782,27 +803,54 @@ void app_main(void)
 		.cut_clauses = true, /* M1.5：子句级切送，首音不等句号 */
 	};
 
+	esp_log_level_set("*", ESP_LOG_WARN);
+	nvs_flash_init();
+	esp_netif_init();
+	esp_event_loop_create_default();
+	creds_resolve();
+	asr.api_key = s_ds_key;
+	tts.api_key = s_mm_key_buf;
+	llm.api_key = s_mm_key_buf;
+
+	/* 首电分流（V-42）：无 WiFi 凭据 → SoftAP + Web 配置页；
+	 * 有则连网，密钥缺口可随时经 'k'（浏览器）或串口后备补 */
+	bool oobe_ap = !s_wifi_ssid[0] || !s_wifi_pass[0];
+
+	if (oobe_ap) {
+		if (aio_init() != 0) {
+			ESP_LOGE(TAG, "aio fail");
+			return;
+		}
+		if (provision_ap_start() != 0) {
+			ESP_LOGE(TAG, "oobe ap fail（串口后备见文档）");
+			return;
+		}
+	} else {
+		wifi_start(s_wifi_ssid, s_wifi_pass);
+		if (aio_init() != 0) {
+			ESP_LOGE(TAG, "aio fail");
+			return;
+		}
+	}
+
 	/* MiniMax 优先（URL 内嵌 GroupID，由组件解析 JWT 拼好）；
 	 * 无 key/解析失败回落 DashScope compatible-mode */
-	if (ks_llm_minimax_url(s_mm_url, sizeof(s_mm_url),
-			       CONFIG_KS_MM_KEY) == 0) {
+	if (s_mm_key_buf[0] &&
+	    ks_llm_minimax_url(s_mm_url, sizeof(s_mm_url),
+			       s_mm_key_buf) == 0) {
 		llm.url = s_mm_url;
-		llm.api_key = CONFIG_KS_MM_KEY;
 		llm.model = "MiniMax-M3";
 		llm.no_think = true;
 		s_use_minimax = true;
 		printf("VL,LLM,MINIMAX,ok\r\n");
 	} else {
+		llm.api_key = CONFIG_VL_LLM_KEY;
 		printf("VL,LLM,MINIMAX,fallback_dashscope\r\n");
 	}
 
-	esp_log_level_set("*", ESP_LOG_WARN);
-	nvs_flash_init();
-	wifi_start();
-	if (aio_init() != 0) {
-		ESP_LOGE(TAG, "aio fail");
-		return;
-	}
+	/* 未配齐云端 key：Web 配置页常驻本局域网（负责人指示：浏览器粘贴） */
+	if (!s_ds_key[0] || !s_mm_key_buf[0])
+		provision_server_start();
 	/* pvPortMalloc 只走内部堆（实测 768KB 创建即 NULL→断言），缓冲数据
 	 * 自取 PSRAM + Static 版本创建 */
 	static StaticStreamBuffer_t s_pb_static;
@@ -834,8 +882,8 @@ void app_main(void)
 	}
 
 	printf("VL,READY,keys: g=round t=embedded-round a=acoustic "
-	       "w=wakenet W=wn-selftest M=llm-toggle u=stats "
-	       "s=sd p=pa l=loopback (%d voice rounds)\r\n",
+	       "w=wakenet W=wn-selftest M=llm-toggle k=web-config "
+	       "u=stats s=sd p=pa l=loopback (%d voice rounds)\r\n",
 	       ROUND_MAX);
 	fflush(stdout);
 	while (s_round < ROUND_MAX) {
@@ -879,13 +927,32 @@ void app_main(void)
 				s_use_minimax = false;
 			} else {
 				llm.url = s_mm_url;
-				llm.api_key = CONFIG_KS_MM_KEY;
+				llm.api_key = s_mm_key_buf;
 				llm.model = "MiniMax-M3";
 				llm.no_think = true;
 				s_use_minimax = true;
 			}
 			printf("VL,LLM,PROVIDER,%s\r\n",
 			       s_use_minimax ? "minimax" : "dashscope");
+			fflush(stdout);
+			continue;
+		}
+		if (ch == 'k' || ch == 'K') {
+			/* Web 配置页（浏览器粘贴长密钥；负责人指示的主通道） */
+			if (provision_server_start() != 0)
+				printf("VL,OOBE,WEB,fail\r\n");
+			fflush(stdout);
+			continue;
+		}
+		if (ch == 'o' || ch == 'O') {
+			/* V-42a 运行时探针：强制切 SoftAP 热点态（esp_hosted
+			 * AP 走 C5 RPC，bring-up 是否成功必须上板看）。
+			 * 复位即恢复 STA */
+			printf("VL,OOBE,AP,switching\r\n");
+			fflush(stdout);
+			esp_wifi_stop();
+			if (provision_ap_start() != 0)
+				printf("VL,OOBE,AP,fail\r\n");
 			fflush(stdout);
 			continue;
 		}
