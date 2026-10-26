@@ -2,9 +2,18 @@
  * voice_loop_main.c — M1.5 语音全链 HIL：采集→ASR→LLM 流式→TTS→播放
  *
  * 目的：方案 v1.5 §6 M1.5 验收——P50<1.5s / P90<2.2s（采集结束→首音出声）。
- * 链路：串口 'g' 触发 → 6s 采音（喂入即流式送 ASR）→ 定稿文本 →
- *       compatible-mode SSE（句读回调）→ TTS（预开连接）→ I2S 播放。
+ * 链路：串口 'g' 触发 → 30s 采音窗（边采边流式送 ASR）→ 定稿文本 →
+ *       chat/completions SSE（ks_llm_chat，句读回调）→ 子句泵
+ *       （常驻队列+feeder 任务逐句喂 TTS）→ PCM → StreamBuffer → I2S。
  * 所有时间戳 esp_timer；输出 "VL,RESULT,…" 单行供统计。
+ *
+ * 任务拓扑（谁拥有什么，改前先看这张图）：
+ *   app_main（本文件）：轮编排、遥测，串口菜单严格同步（键无并发）
+ *   ttsfeed（常驻）：子句队列 → ks_tts_feed（MiniMax 每句一 HTTPS）
+ *   pb（常驻）：s_pb StreamBuffer → aio_play，扬声器唯一写者
+ *   wn_feed/wn_det（'w' 后常驻）：AFE 喂音/检测，唤醒即 beep
+ *   一批一次性探测任务：tone/prompt/tlisten（prio 6，可与 pb 并发，
+ *   由 audio_io 内部互斥锁兜底）
  */
 #include <math.h>
 #include <stdio.h>
@@ -24,7 +33,6 @@
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "kaleido_speech.h"
-#include "llm_stream.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 #include "sdmmc_cmd.h"
@@ -52,6 +60,7 @@ static StreamBufferHandle_t s_pb;
 #define PB_BYTES	786432
 
 void wakenet_start(struct ks_tts_cfg *tts, bool selftest);
+bool wakenet_selftest_busy(void);
 
 static void play_task(void *arg)
 {
@@ -90,11 +99,13 @@ static void on_asr_text(void *user, const char *sentence, bool final)
 	strlcat(s_asr_text, sentence, sizeof(s_asr_text));
 }
 
-/* ---- LLM 句读回调 → 子句队列（V-41 解嵌套）----
- * 原实现：on_llm_sentence 在 LLM 的 HTTP 事件回调里直接跑 TTS 的
- * esp_http_client+TLS——嵌套 TLS 栈深 ~13KB 顶穿主栈/非重入，
- * 实测 PC 跳进 JSON 数据（Instruction access fault）。改为回调仅
- * 入队，独立任务喂 TTS；附带收益：LLM 流后续子句与 TTS 取数并行 */
+/* ---- 子句泵：LLM 句读回调(主任务) → 队列 → ttsfeed 任务 → TTS ----
+ * V-41 解嵌套：原实现 on_llm_sentence 在 LLM 的 HTTP 事件回调里直接
+ * 跑 TTS 的 esp_http_client+TLS——嵌套 TLS 栈深 ~13KB 顶穿主栈/非重
+ * 入，实测 PC 跳进 JSON 数据（Instruction access fault）。
+ * 泵为常驻服务（boot 创建一次）：曾按轮创建 feeder，早退路径漏发
+ * 哨兵 → 幽灵消费者与下一轮分抢队列（评审 2026-10-26 BUG#2）。
+ * CLAUSE_ITEM_BYTES=512 与 ks_llm 内部攒句缓冲等宽，两者须同步改 */
 static QueueHandle_t s_clause_q;
 static SemaphoreHandle_t s_feeder_done;
 #define CLAUSE_ITEM_BYTES 512
@@ -102,8 +113,11 @@ static SemaphoreHandle_t s_feeder_done;
 static volatile bool s_tts_open;
 static bool s_use_minimax;
 static char s_mm_url[160];
+static volatile bool s_busy;	/* 一轮/自检进行中：互斥 'g'/'a'/'W' */
 
-/* M1.5 杠杆：轮开始即后台开 TTS 会话，~2.8s 冷建连藏进采音窗 */
+/* MiniMax 无会话状态（每 feed 一请求），ks_tts_open 只是解析 JWT
+ * 存 cfg——"预热"在 MiniMax 下近乎零成本；DashScope 下才有 ~2.8s
+ * 冷建连可藏进采音窗。保留任务形态以兼容两种 provider */
 static void tts_prewarm_task(void *arg)
 {
 	struct ks_tts_cfg *cfg = arg;
@@ -123,20 +137,18 @@ static void tts_feeder_task(void *arg)
 
 	(void)arg;
 	for (;;) {
-		if (xQueueReceive(s_clause_q, item, portMAX_DELAY) !=
-		    pdTRUE)
+		if (xQueueReceive(s_clause_q, item, portMAX_DELAY) != pdTRUE)
 			continue;
-		if (!item[0]) {		/* NULL 哨兵：流结束 */
+		if (!item[0]) {		/* 全零项=本轮收口哨兵 */
 			if (s_tts_open) {
 				ks_tts_feed(NULL, true, 15000);
 				s_tts_open = false;
 			}
 			xSemaphoreGive(s_feeder_done);
-			vTaskDelete(NULL);
-			return;
+			continue;	/* 不退出：常驻等下一轮 */
 		}
 		if (!s_tts_open) {
-			ESP_LOGE(TAG, "tts not prewarmed");
+			ESP_LOGE(TAG, "tts not open, drop clause");
 			continue;
 		}
 		if (ks_tts_feed(item, false, 15000) != 0)
@@ -144,27 +156,48 @@ static void tts_feeder_task(void *arg)
 	}
 }
 
-static bool on_llm_sentence(void *user, const char *sentence,
-			    bool final)
+/* 轮开始：清空上一轮残留，投喂权交本轮 */
+static void clause_pump_reset(void)
 {
-	(void)user; /* TTS 已在采音窗内预开（M1.5），此处只管入队 */
-	static const char eos[CLAUSE_ITEM_BYTES];	/* 全零=流结束哨兵 */
+	xQueueReset(s_clause_q);
+	xSemaphoreTake(s_feeder_done, 0);
+}
+
+/* 轮收口：哨兵入队（队满重试至限期，绝不静默丢——丢了就 30s 干等）
+ * 并等 feeder 排空。返回 true 泵已干净收口 */
+static bool clause_pump_stop(uint32_t timeout_ms)
+{
+	static const char eos[CLAUSE_ITEM_BYTES];	/* 全零=哨兵 */
+	int64_t deadline = esp_timer_get_time() +
+			   (int64_t)timeout_ms * 1000;
+
+	while (xQueueSend(s_clause_q, eos, pdMS_TO_TICKS(200)) != pdTRUE) {
+		if (esp_timer_get_time() >= deadline) {
+			ESP_LOGE(TAG, "pump sentinel lost (feeder stuck)");
+			return false;
+		}
+	}
+	{
+		int64_t left_us = deadline - esp_timer_get_time();
+		/* 30s 上限：最坏 8 子句 × 每句 15s 超时的排水余量 */
+		return xSemaphoreTake(s_feeder_done,
+				      pdMS_TO_TICKS((uint32_t)(left_us / 1000)));
+	}
+}
+
+static bool on_llm_sentence(void *user, const char *sentence, bool final)
+{
+	(void)user;	/* TTS 由常驻 feeder 负责，回调只管入队 */
+	(void)final;	/* 流结束哨兵由 clause_pump_stop 统一下发 */
 
 	if (!t_llm_first_clause && sentence[0])
 		t_llm_first_clause = esp_timer_get_time();
-	if (final && !sentence[0]) {
-		xQueueSend(s_clause_q, eos, pdMS_TO_TICKS(200));
-		return true;
-	}
 	if (!sentence[0])
-		return true; /* 空子句防御 */
-	if (xQueueSend(s_clause_q, sentence, pdMS_TO_TICKS(200)) !=
-	    pdTRUE) {
+		return true;	/* 空子句防御 */
+	if (xQueueSend(s_clause_q, sentence, pdMS_TO_TICKS(200)) != pdTRUE) {
 		ESP_LOGW(TAG, "clause q full, drop");
-		return false;
+		return false;	/* 消费不动：让 LLM 流尽早停 */
 	}
-	if (final)
-		xQueueSend(s_clause_q, eos, pdMS_TO_TICKS(200));
 	return true;
 }
 
@@ -405,13 +438,17 @@ static void prompt_play_task(void *arg)
 	vTaskDelete(NULL);
 }
 
-/* TTS 播放期采音：每秒报 RMS，证明出声 */
+/* TTS 播放期采音：每秒报 RMS，证明出声。截止时刻用静态存储——
+ * 曾把栈变量指针交给本任务，acoustic_round 返回后任务仍在解引用
+ * 已死栈帧（评审 2026-10-26 BUG#6） */
+static int64_t s_listen_end;
+
 static void tts_listen_task(void *arg)
 {
 	static int16_t win[16000];
-	int64_t *t_end = arg;
 
-	while (esp_timer_get_time() < *t_end) {
+	(void)arg;
+	while (esp_timer_get_time() < s_listen_end) {
 		int n = aio_capture(win, 16000, 1500);
 
 		if (n <= 0)
@@ -423,12 +460,16 @@ static void tts_listen_task(void *arg)
 }
 
 static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
-			   struct llm_cfg *llm)
+			   struct ks_llm_cfg *llm)
 {
 	size_t total = (test_prompt_end - test_prompt_start) / 2;
 	int16_t *cap = heap_caps_malloc(total * 2, MALLOC_CAP_SPIRAM);
 	static int16_t chunk[CAP_CHUNK];
-	int64_t t_listen_end;
+	int64_t ftok = 0;
+	int rms_noise = 0;
+	int rms_play = 0;
+	size_t got = 0;
+	int rc;
 
 	if (!cap) {
 		printf("VL,A,FAIL,oom\r\n");
@@ -441,7 +482,6 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 
 	/* ① 静默底噪（1s） */
 	static int16_t noise[16000];
-	int rms_noise = 0;
 
 	if (aio_capture(noise, 16000, 2000) == 16000)
 		rms_noise = rms_i16(noise, 16000);
@@ -449,12 +489,12 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	/* ② 外放 + 同步采回 */
 	s_asr_text[0] = '\0';
 	s_tts_open = false;
+	clause_pump_reset();
 	t_capture_end = t_asr_final = 0;
 	t_llm_first = t_llm_first_clause = t_tts_first_pcm = t_first_audio = 0;
 
 	xTaskCreatePinnedToCore(prompt_play_task, "pp", 4096, NULL, 6,
 				NULL, 0);
-	size_t got = 0;
 
 	while (got < total) {
 		int n = aio_capture(chunk, CAP_CHUNK, 1000);
@@ -467,7 +507,7 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	/* 播放与采集同钟：采满 total 即放完；再等 DMA 尾部排空 */
 	vTaskDelay(pdMS_TO_TICKS(300));
 	t_capture_end = esp_timer_get_time();
-	int rms_play = got ? rms_i16(cap, got) : 0;
+	rms_play = got ? rms_i16(cap, got) : 0;
 
 	printf("VL,A,ACOUSTIC,noise_rms=%d,played_rms=%d,got=%u/%u,"
 	       "air_snr_db=%.1f\r\n",
@@ -481,8 +521,7 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 			.on_text = on_asr_text }) != 0) {
 		printf("VL,A,FAIL,asr_open\r\n");
 		fflush(stdout);
-		free(cap);
-		return;
+		goto out;
 	}
 	for (size_t off = 0; off < got; off += CAP_CHUNK) {
 		size_t n = got - off;
@@ -497,40 +536,37 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		printf("VL,A,FAIL,asr_finish\r\n");
 		fflush(stdout);
 		ks_asr_close();
-		free(cap);
-		return;
+		goto out;
 	}
 	t_asr_final = esp_timer_get_time();
 	ks_asr_close();
 	printf("VL,A,ASR_ECHO,%s\r\n",
 	       s_asr_text[0] ? s_asr_text : "(empty)");
 	fflush(stdout);
-	if (!s_asr_text[0]) {
-		free(cap);
-		return;
-	}
+	if (!s_asr_text[0])
+		goto out;
 
-	/* ④ LLM → TTS 外放（TTS 预开与 LLM 首句并行）；播放期同步采音 */
+	/* ④ LLM → 子句泵 → TTS 外放；播放期同步采音 */
 	if (ks_tts_open(tts, &(struct ks_tts_events){
 			.on_pcm = on_tts_pcm }) == 0) {
 		s_tts_open = true;
 	} else {
-		ESP_LOGE(TAG, "tts prewarm fail");
+		ESP_LOGE(TAG, "tts open fail");
 	}
-	t_listen_end = esp_timer_get_time() + 15000000;
+	s_listen_end = esp_timer_get_time() + 15000000;
 	xTaskCreatePinnedToCore(tts_listen_task, "tlisten", 4096,
-				&t_listen_end, 4, NULL, 0);
+				NULL, 4, NULL, 0);
 	llm->user_msg = s_asr_text;
-	int64_t ftok = 0;
-	int rc = llm_stream_chat(llm, on_llm_sentence, tts, &ftok);
-
+	rc = ks_llm_chat(llm, on_llm_sentence, NULL, &ftok);
 	t_llm_first = ftok;
+
+	if (!clause_pump_stop(30000))
+		ESP_LOGW(TAG, "pump not done in 30s");
 	ks_tts_close();
-	free(cap);
 	if (rc != 0) {
 		printf("VL,A,FAIL,llm=%d\r\n", rc);
 		fflush(stdout);
-		return;
+		goto out;
 	}
 	vTaskDelay(pdMS_TO_TICKS(500));
 	printf("VL,A,RESULT,asr_final=%lld,llm_first=%lld,"
@@ -542,6 +578,8 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	       t_first_audio ? (t_first_audio - t_capture_end) / 1000 : -1,
 	       t_first_audio ? (t_first_audio - t_capture_end) / 1000 : -1);
 	fflush(stdout);
+out:
+	free(cap);
 }
 
 /* ---- WiFi（M1 已验证路径，最简 station） ---- */
@@ -582,10 +620,14 @@ static void wifi_start(void)
 }
 
 static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
-		     struct llm_cfg *llm, bool embedded)
+		     struct ks_llm_cfg *llm, bool embedded)
 {
 	static int16_t chunk[CAP_CHUNK];
 	int64_t t_trigger = esp_timer_get_time();
+	int64_t cap_start;
+	int64_t ftok = 0;
+	size_t fed = 0;
+	int rc;
 
 	/* 轮隔离：等上一轮回复播完（≤20s），防残留音频污染本轮时间戳 */
 	for (int i = 0; i < 100 && xStreamBufferBytesAvailable(s_pb); i++)
@@ -593,6 +635,7 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 
 	s_asr_text[0] = '\0';
 	s_tts_open = false;                 /* G6：跨轮复位      */
+	clause_pump_reset();
 	t_capture_end = t_asr_final = 0;
 	t_llm_first = t_llm_first_clause = t_tts_first_pcm = t_first_audio = 0;
 
@@ -609,19 +652,11 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	}
 	xTaskCreatePinnedToCore(tts_prewarm_task, "ttspre", 6144, tts, 5,
 				NULL, 0);
-	/* V-41 解嵌套：子句队列 + 独立 TTS 喂送（见 on_llm_sentence 注） */
-	if (!s_clause_q) {
-		s_clause_q = xQueueCreate(8, CLAUSE_ITEM_BYTES);
-		s_feeder_done = xSemaphoreCreateBinary();
-	}
-	xQueueReset(s_clause_q);
-	xSemaphoreTake(s_feeder_done, 0);
-	xTaskCreatePinnedToCore(tts_feeder_task, "ttsfeed", 10240, NULL,
-				5, NULL, 0);
+	/* V-41 解嵌套：子句队列 + 常驻 feeder 喂 TTS（见任务拓扑注） */
+
 	/* 边采边喂（产品真实形态：流式）；embedded 模式以 1x 节奏
 	 * 喂内置测试 PCM（无人值守回归） */
-	int64_t cap_start = esp_timer_get_time();
-	size_t fed = 0;
+	cap_start = esp_timer_get_time();
 
 	if (embedded) {
 		const int16_t *p = (const void *)test_prompt_start;
@@ -660,33 +695,39 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		}
 	}
 	t_capture_end = esp_timer_get_time();
+
+	rc = 0;
 	if (ks_asr_finish(15000) != 0) {
 		ESP_LOGE(TAG, "asr finish fail");
 		ks_asr_close();
-		return -2;
+		rc = -2;
+		goto out;
 	}
 	t_asr_final = esp_timer_get_time();
 	ks_asr_close();
 	printf("VL,ASR,%s\r\n", s_asr_text[0] ? s_asr_text : "(empty)");
 	fflush(stdout);
-	if (!s_asr_text[0])
-		return -3;
+	if (!s_asr_text[0]) {
+		rc = -3;
+		goto out;
+	}
 
+	/* LLM 流式 → 子句入队；泵排空（含 TTS flush）后再收口会话。
+	 * 所有路径（含成功）统一过 out：哨兵+close 保证无幽灵会话/任务，
+	 * 泵收口幂等——feeder 空闲时哨兵即回即取，代价可忽略 */
 	llm->user_msg = s_asr_text;
-	int64_t ftok = 0;
-
-	int rc = llm_stream_chat(llm, on_llm_sentence, tts, &ftok);
-	if (!xSemaphoreTake(s_feeder_done, pdMS_TO_TICKS(30000)))
-		ESP_LOGW(TAG, "feeder not done in 30s");
-	ks_tts_close(); /* 消费者异常中断时兜底 */
+	rc = ks_llm_chat(llm, on_llm_sentence, NULL, &ftok);
+	t_llm_first = ftok;
+	if (!clause_pump_stop(30000))
+		ESP_LOGW(TAG, "pump not done in 30s");
 	if (rc != 0) {
 		ESP_LOGE(TAG, "llm fail %d", rc);
-		return -4;
+		rc = -4;
+		goto out;
 	}
+
 	/* 等播放队列清空（尾部余量） */
 	vTaskDelay(pdMS_TO_TICKS(500));
-	int64_t now = esp_timer_get_time();
-
 	printf("VL,RESULT,round=%d,fed_ms=%u,asr_final=%lld,"
 	       "llm_first=%lld,clause=%lld,tts_first_pcm=%lld,"
 	       "first_audio=%lld,"
@@ -704,8 +745,12 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	       t_first_audio ? (t_first_audio -
 				t_capture_end) / 1000 : -1);
 	fflush(stdout);
-	(void)now;
-	return 0;
+out:
+	/* 早退路径泵可能尚未收口（预热会话还开着）：flush 哨兵再关 */
+	if (!clause_pump_stop(15000))
+		ESP_LOGW(TAG, "pump cleanup timeout");
+	ks_tts_close();
+	return rc;
 }
 
 void app_main(void)
@@ -726,8 +771,7 @@ void app_main(void)
 		.voice = CONFIG_KS_TTS_MM_VOICE,
 		.sample_rate = 16000,
 	};
-	char mm_gid[48];
-	static struct llm_cfg llm = {
+	static struct ks_llm_cfg llm = {
 		.url = "https://dashscope.aliyuncs.com/"
 		       "compatible-mode/v1/chat/completions",
 		.api_key = CONFIG_VL_LLM_KEY,
@@ -737,17 +781,17 @@ void app_main(void)
 		.user_msg = "",
 		.cut_clauses = true, /* M1.5：子句级切送，首音不等句号 */
 	};
-	if (ks_mm_group_id(CONFIG_KS_MM_KEY, mm_gid, sizeof(mm_gid)) == 0) {
-		snprintf(s_mm_url, sizeof(s_mm_url),
-			 "https://api.minimaxi.com/v1/text/"
-			 "chatcompletion_v2?GroupId=%s", mm_gid);
+
+	/* MiniMax 优先（URL 内嵌 GroupID，由组件解析 JWT 拼好）；
+	 * 无 key/解析失败回落 DashScope compatible-mode */
+	if (ks_llm_minimax_url(s_mm_url, sizeof(s_mm_url),
+			       CONFIG_KS_MM_KEY) == 0) {
 		llm.url = s_mm_url;
 		llm.api_key = CONFIG_KS_MM_KEY;
 		llm.model = "MiniMax-M3";
 		llm.no_think = true;
 		s_use_minimax = true;
-		printf("VL,LLM,MINIMAX,ok,gid_len=%d\n",
-		       (int)strlen(mm_gid));
+		printf("VL,LLM,MINIMAX,ok\r\n");
 	} else {
 		printf("VL,LLM,MINIMAX,fallback_dashscope\r\n");
 	}
@@ -776,10 +820,28 @@ void app_main(void)
 	}
 	xTaskCreatePinnedToCore(play_task, "pb", 4096, NULL, 5, NULL, 0);
 
-	printf("VL,READY,g=round a=acoustic w=wakenet W=wn-selftest\r\n");
+	/* 子句泵常驻（一次创建，轮内 reset/stop 控制生命周期） */
+	s_clause_q = xQueueCreate(8, CLAUSE_ITEM_BYTES);
+	s_feeder_done = xSemaphoreCreateBinary();
+	if (!s_clause_q || !s_feeder_done) {
+		ESP_LOGE(TAG, "pump create fail");
+		return;
+	}
+	if (xTaskCreatePinnedToCore(tts_feeder_task, "ttsfeed", 10240,
+				    NULL, 5, NULL, 0) != pdPASS) {
+		ESP_LOGE(TAG, "feeder create fail");
+		return;
+	}
+
+	printf("VL,READY,keys: g=round t=embedded-round a=acoustic "
+	       "w=wakenet W=wn-selftest M=llm-toggle u=stats "
+	       "s=sd p=pa l=loopback (%d voice rounds)\r\n",
+	       ROUND_MAX);
 	fflush(stdout);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
+		bool round_key = (ch == 'g' || ch == 'G' || ch == 't' ||
+				  ch == 'T');
 
 		if (ch == 's' || ch == 'S') {
 			sd_test();
@@ -793,8 +855,18 @@ void app_main(void)
 			loopback_tone();
 			continue;
 		}
+		/* 互斥门：轮次/声学环回与唤醒自检都会独占 TTS 会话
+		 * （ks_tts_open 会清 s_mm 单例），并发即互相拆台 */
+		if ((round_key || ch == 'a' || ch == 'A' || ch == 'W') &&
+		    (s_busy || wakenet_selftest_busy())) {
+			printf("VL,BUSY\r\n");
+			fflush(stdout);
+			continue;
+		}
 		if (ch == 'a' || ch == 'A') {
+			s_busy = true;
 			acoustic_round(&asr, &tts, &llm);
+			s_busy = false;
 			continue;
 		}
 		if (ch == 'M') {
@@ -833,12 +905,14 @@ void app_main(void)
 			wakenet_start(&tts, true);
 			continue;
 		}
-		if (ch != 'g' && ch != 'G' && ch != 't' && ch != 'T')
+		if (!round_key)
 			continue;
 		bool embedded = (ch == 't' || ch == 'T');
 
+		s_busy = true;
 		s_round++;
 		one_round(&asr, &tts, &llm, embedded);
+		s_busy = false;
 		printf("VL,READY,press 'g'+Enter (%d/%d used)\r\n",
 		       s_round, ROUND_MAX);
 		fflush(stdout);

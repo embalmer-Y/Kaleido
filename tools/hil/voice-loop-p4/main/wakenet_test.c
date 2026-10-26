@@ -26,10 +26,10 @@
 extern void on_tts_pcm(void *user, const uint8_t *pcm, size_t len);
 void wakenet_start(struct ks_tts_cfg *tts, bool selftest);
 
-static const char *TAG = "wn";
-
 static const esp_afe_sr_iface_t *s_afe;
 static esp_afe_sr_data_t *s_afe_data;
+static volatile bool s_running;		/* 重入守卫：AFE/模型只初始化一次 */
+static volatile bool s_selftest;	/* 'W' 自检进行中（主菜单互斥门用） */
 static volatile int s_wake_cnt;
 static volatile int64_t s_speak_us;	/* TTS 开口时刻（延迟基准） */
 static int16_t s_beep[4800];		/* 300ms 提示音 */
@@ -57,9 +57,12 @@ static void feed_task(void *arg)
 	}
 	printf("VL,WN,FEED,chunk=%d\r\n", chunk);
 	fflush(stdout);
+	/* 核 0 喂音 / 核 1 检测（创建处绑核）：与 LVGL/网络任务天然错峰 */
 	for (;;) {
 		int n = aio_capture(buf, chunk, 2000);
 
+		/* 采不足一帧补静音：AFE 按固定节拍消费，断流会拖垮
+		 * 内部缓冲对齐（宁可喂静音也不饿它） */
 		if (n < chunk)
 			memset(buf + n, 0, (chunk - n) * sizeof(int16_t));
 		s_afe->feed(s_afe_data, buf);
@@ -116,14 +119,34 @@ static void announce_task(void *arg)
 	printf("VL,WN,SELFTEST,done,hits=%d/%d\r\n",
 	       s_wake_cnt - hits0, cycles);
 	fflush(stdout);
+	s_selftest = false;
 	vTaskDelete(NULL);
+}
+
+bool wakenet_selftest_busy(void)
+{
+	return s_selftest;
 }
 
 void wakenet_start(struct ks_tts_cfg *tts, bool selftest)
 {
 	uint32_t i0 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 	uint32_t p0 = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-	srmodel_list_t *models = esp_srmodel_init("model");
+	srmodel_list_t *models;
+
+	/* 二次进入会重复 esp_srmodel_init（泄模型表）+ 二次 create AFE
+	 * （数百 KB）并覆盖 s_afe/s_afe_data——旧 feed/detect 任务仍在
+	 * 按新指针跑，双重喂入 + OOM。当前无停止路径（任务常驻到复位），
+	 * 属 M2 状态机工作，这里只保证不重复起 */
+	if (s_running) {
+		printf("VL,WN,ALREADY_RUNNING\r\n");
+		fflush(stdout);
+		return;
+	}
+	s_running = true;
+	s_selftest = selftest;
+
+	models = esp_srmodel_init("model");
 
 	if (!models || models->num == 0) {
 		printf("VL,WN,ERROR=no_model,check CONFIG_SR_WN_*\r\n");
@@ -164,7 +187,9 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest)
 	xTaskCreatePinnedToCore(feed_task, "wn_feed", 4096, NULL, 5, NULL, 0);
 	xTaskCreatePinnedToCore(detect_task, "wn_det", 8192, NULL, 5, NULL, 1);
 	if (selftest)
-		xTaskCreatePinnedToCore(announce_task, "wn_say", 8192, tts,
+		/* 10240 栈：与 ttsfeeder 同款——announce 内跑完整
+		 * MiniMax HTTPS+TLS（esp_http_client+mbedtls） */
+		xTaskCreatePinnedToCore(announce_task, "wn_say", 10240, tts,
 					4, NULL, 0);
 	printf("VL,WN,LISTENING%s\r\n", selftest ? ",selftest" : "");
 	fflush(stdout);

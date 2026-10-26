@@ -19,6 +19,7 @@
 #include "es8311_codec.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 
 #define AIO_I2C_SDA	7
@@ -34,6 +35,12 @@
 static const char *TAG = "aio";
 static i2s_chan_handle_t s_tx, s_rx;
 static esp_codec_dev_handle_t s_in, s_out;
+/* 立体声交织静态缓冲 st[] 是各函数私有状态：两个调用者同时进同一
+ * 函数即互相踩写（wakenet 采集 vs 'g' 轮采集；beep vs TTS 播放）。
+ * 采集/播放各一把互斥锁串行化（评审 2026-10-26 BUG#4）。
+ * 锁语义为"尽力串行"：取锁失败返回 0 样本，调用方按超时处理 */
+static SemaphoreHandle_t s_cap_mux;
+static SemaphoreHandle_t s_play_mux;
 
 int aio_init(void)
 {
@@ -52,7 +59,8 @@ int aio_init(void)
 	i2s_chan_config_t chan_cfg =
 		I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
 	/* 欠载时 DMA 默认循环重发最后一个缓冲区（实测：语音末字无限复读、
-	 * 短音后持续蜂音）——必须开自动清零，欠载发静音 */
+	 * 短音后持续蜂音）——必须开自动清零，欠载发静音。
+	 * dma 8 描述符 × 320 帧 ≈160ms 缓冲：吸收播放任务被抢占的抖动 */
 	chan_cfg.auto_clear = true;
 	chan_cfg.dma_desc_num = 8;
 	chan_cfg.dma_frame_num = 320;
@@ -121,6 +129,10 @@ int aio_init(void)
 	s_out = esp_codec_dev_new(&out_cfg);
 	if (!s_in || !s_out)
 		return -4;
+	s_cap_mux = xSemaphoreCreateMutex();
+	s_play_mux = xSemaphoreCreateMutex();
+	if (!s_cap_mux || !s_play_mux)
+		return -5;
 
 	esp_codec_dev_sample_info_t fs = {
 		.sample_rate = AIO_SR,
@@ -154,6 +166,9 @@ int aio_capture(int16_t *mono, size_t samples, uint32_t timeout_ms)
 	static int16_t st[3200];
 	size_t got_frames = 0;
 
+	if (!s_cap_mux ||
+	    xSemaphoreTake(s_cap_mux, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
+		return 0;
 	while (got_frames < samples) {
 		size_t want = samples - got_frames;
 		size_t need, got = 0;
@@ -179,6 +194,7 @@ int aio_capture(int16_t *mono, size_t samples, uint32_t timeout_ms)
 		if (f < want)
 			break; /* 超时/断流 */
 	}
+	xSemaphoreGive(s_cap_mux);
 	return got_frames;
 }
 
@@ -188,6 +204,9 @@ int aio_play(const int16_t *mono, size_t samples, uint32_t timeout_ms)
 	static int16_t st[3200];
 	size_t done = 0;
 
+	if (!s_play_mux ||
+	    xSemaphoreTake(s_play_mux, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
+		return 0;
 	while (done < samples) {
 		size_t n = samples - done;
 
@@ -214,5 +233,6 @@ int aio_play(const int16_t *mono, size_t samples, uint32_t timeout_ms)
 			break;
 		done += n;
 	}
+	xSemaphoreGive(s_play_mux);
 	return done;
 }

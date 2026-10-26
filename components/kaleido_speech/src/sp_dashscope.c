@@ -24,6 +24,10 @@
 #define KS_URI_PATH "/api-ws/v1/inference"
 #define KS_TX_TIMEOUT_MS 8000
 #define KS_PCM_CHUNK 3200 /* 100ms @16k s16le mono */
+/* WS 收缓冲：超长帧会被客户端按 4KB 分片、每片当作独立 TEXT 事件
+ * 重派——片段 JSON 必然解析失败被丢（长句无声蒸发）。8192 覆盖
+ * 实测最长 result-generated 帧 */
+#define KS_WS_BUF 8192
 
 static const char *TAG = "kaleido_speech";
 
@@ -76,28 +80,6 @@ static char *run_task_build(const char *task_id, const char *model,
 	cJSON_AddItemToObject(pl, "parameters", par);
 	/* run-task 必带空 input 对象（V-33 asr_probe 实证；缺此字段
 	 * 服务端报 InvalidParameter: Missing required parameter 'payload.input'） */
-	cJSON_AddItemToObject(pl, "input", in);
-	cJSON_AddItemToObject(root, "header", hdr);
-	cJSON_AddItemToObject(root, "payload", pl);
-
-	s = cJSON_PrintUnformatted(root);
-	cJSON_Delete(root);
-	return s;
-}
-
-static char *cont_task_build(const char *task_id, const char *text)
-{
-	cJSON *root = cJSON_CreateObject();
-	cJSON *hdr = cJSON_CreateObject();
-	cJSON *pl = cJSON_CreateObject();
-	cJSON *in = cJSON_CreateObject();
-	char *s;
-
-	cJSON_AddStringToObject(hdr, "action", "continue-task");
-	cJSON_AddStringToObject(hdr, "task_id", task_id);
-	cJSON_AddStringToObject(hdr, "streaming", "duplex");
-	if (text)
-		cJSON_AddStringToObject(in, "text", text);
 	cJSON_AddItemToObject(pl, "input", in);
 	cJSON_AddItemToObject(root, "header", hdr);
 	cJSON_AddItemToObject(root, "payload", pl);
@@ -247,11 +229,13 @@ int ks_asr_open(const struct ks_asr_cfg *cfg,
 	char auth[192];
 	char *run;
 	esp_websocket_client_config_t wc = {
-		.buffer_size = 4096,
+		.buffer_size = KS_WS_BUF,
 		.network_timeout_ms = 10000,
 		.crt_bundle_attach = esp_crt_bundle_attach,
 	};
 
+	if (!cfg || !cfg->url || !cfg->api_key || !cfg->model)
+		return -1;
 	if (s_asr)
 		return -1;
 	s_asr = calloc(1, sizeof(*s_asr));
@@ -263,8 +247,11 @@ int ks_asr_open(const struct ks_asr_cfg *cfg,
 	s_asr->connected = xSemaphoreCreateBinary();
 	s_asr->started = xSemaphoreCreateBinary();
 	s_asr->finished = xSemaphoreCreateBinary();
+	if (!s_asr->connected || !s_asr->started || !s_asr->finished)
+		goto fail;
 
-	/* uri 去尾部路径，拼标准 inference 端点（容错首尾 '/'） */
+	/* uri 去尾部路径，拼标准 inference 端点（容错首尾 '/'）；
+	 * esp_websocket_client 在 init 时 strdup 配置串，栈上缓冲安全 */
 	{
 		char host[192];
 		size_t n = strlen(cfg->url);
@@ -283,8 +270,10 @@ int ks_asr_open(const struct ks_asr_cfg *cfg,
 	s_asr->ws = esp_websocket_client_init(&wc);
 	if (!s_asr->ws)
 		goto fail;
-	ESP_ERROR_CHECK(esp_websocket_register_events(
-		s_asr->ws, WEBSOCKET_EVENT_ANY, asr_ws_event, NULL));
+	/* 组件库代码不许 panic 整机：注册失败走回收路径 */
+	if (esp_websocket_register_events(s_asr->ws, WEBSOCKET_EVENT_ANY,
+					  asr_ws_event, NULL) != ESP_OK)
+		goto fail;
 	if (esp_websocket_client_start(s_asr->ws) != ESP_OK)
 		goto fail;
 	if (!xSemaphoreTake(s_asr->connected, pdMS_TO_TICKS(10000))) {
@@ -294,12 +283,17 @@ int ks_asr_open(const struct ks_asr_cfg *cfg,
 
 	run = run_task_build(s_asr->task_id, cfg->model, NULL,
 			     cfg->sample_rate);
-	int rc = esp_websocket_client_send_text(s_asr->ws, run,
-						strlen(run),
-						KS_TX_TIMEOUT_MS);
-	free(run);
-	if (rc < 0)
+	if (!run)		/* cJSON OOM */
 		goto fail;
+	{
+		int rc = esp_websocket_client_send_text(s_asr->ws, run,
+							strlen(run),
+							KS_TX_TIMEOUT_MS);
+
+		free(run);
+		if (rc < 0)
+			goto fail;
+	}
 
 	/* 等 task-started（服务端就绪）；失败路径由 started 兜底 give */
 	if (!xSemaphoreTake(s_asr->started, pdMS_TO_TICKS(10000))) {
@@ -358,6 +352,8 @@ int ks_asr_finish(uint32_t timeout_ms)
 		return -3;
 	s_asr->pend_len = 0;
 	f = fin_task_build(s_asr->task_id);
+	if (!f)
+		return -3;
 	rc = esp_websocket_client_send_text(s_asr->ws, f, strlen(f),
 					    KS_TX_TIMEOUT_MS);
 	free(f);
@@ -406,9 +402,32 @@ struct ks_tts_sess {
 	int64_t feed_us;
 	bool failed;
 	bool done;
+	bool closing;	/* V-41 UAF 防御（与 ASR 同款）：关闭期丢弃残余事件 */
 };
 
 static struct ks_tts_sess *s_tts;
+
+static char *cont_task_build(const char *task_id, const char *text)
+{
+	cJSON *root = cJSON_CreateObject();
+	cJSON *hdr = cJSON_CreateObject();
+	cJSON *pl = cJSON_CreateObject();
+	cJSON *in = cJSON_CreateObject();
+	char *s;
+
+	cJSON_AddStringToObject(hdr, "action", "continue-task");
+	cJSON_AddStringToObject(hdr, "task_id", task_id);
+	cJSON_AddStringToObject(hdr, "streaming", "duplex");
+	if (text)
+		cJSON_AddStringToObject(in, "text", text);
+	cJSON_AddItemToObject(pl, "input", in);
+	cJSON_AddItemToObject(root, "header", hdr);
+	cJSON_AddItemToObject(root, "payload", pl);
+
+	s = cJSON_PrintUnformatted(root);
+	cJSON_Delete(root);
+	return s;
+}
 
 static void tts_ws_event(void *arg, esp_event_base_t base, int32_t id,
 			 void *data)
@@ -417,6 +436,9 @@ static void tts_ws_event(void *arg, esp_event_base_t base, int32_t id,
 	char event[24] = "", sentence[8] = "", err[160] = "";
 	bool dummy = false;
 
+	/* 同 ASR：destroy 后客户端任务仍可能派发残余事件 */
+	if (!s_tts || s_tts->closing)
+		return;
 	if (id == WEBSOCKET_EVENT_CONNECTED) {
 		xSemaphoreGive(s_tts->connected);
 		return;
@@ -464,11 +486,16 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 	char auth[192];
 	char *run;
 	esp_websocket_client_config_t wc = {
-		.buffer_size = 4096,
+		.buffer_size = KS_WS_BUF,
 		.network_timeout_ms = 10000,
 		.crt_bundle_attach = esp_crt_bundle_attach,
 	};
 
+	/* voice 缺失会被 run_task_build 当成 ASR 帧（task:function 走
+	 * recognition），之后只能等 task-started 超时——前置拦下 */
+	if (!cfg || !cfg->url || !cfg->api_key || !cfg->model ||
+	    !cfg->voice)
+		return -1;
 	if (s_tts)
 		return -1;
 	s_tts = calloc(1, sizeof(*s_tts));
@@ -479,6 +506,8 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 	s_tts->connected = xSemaphoreCreateBinary();
 	s_tts->started = xSemaphoreCreateBinary();
 	s_tts->finished = xSemaphoreCreateBinary();
+	if (!s_tts->connected || !s_tts->started || !s_tts->finished)
+		goto fail;
 
 	{
 		char host[192];
@@ -498,8 +527,9 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 	s_tts->ws = esp_websocket_client_init(&wc);
 	if (!s_tts->ws)
 		goto fail;
-	ESP_ERROR_CHECK(esp_websocket_register_events(
-		s_tts->ws, WEBSOCKET_EVENT_ANY, tts_ws_event, NULL));
+	if (esp_websocket_register_events(s_tts->ws, WEBSOCKET_EVENT_ANY,
+					  tts_ws_event, NULL) != ESP_OK)
+		goto fail;
 	if (esp_websocket_client_start(s_tts->ws) != ESP_OK)
 		goto fail;
 	if (!xSemaphoreTake(s_tts->connected, pdMS_TO_TICKS(10000))) {
@@ -509,12 +539,17 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 
 	run = run_task_build(s_tts->task_id, cfg->model, cfg->voice,
 			     cfg->sample_rate);
-	int rc = esp_websocket_client_send_text(s_tts->ws, run,
-						strlen(run),
-						KS_TX_TIMEOUT_MS);
-	free(run);
-	if (rc < 0)
+	if (!run)
 		goto fail;
+	{
+		int rc = esp_websocket_client_send_text(s_tts->ws, run,
+							strlen(run),
+							KS_TX_TIMEOUT_MS);
+
+		free(run);
+		if (rc < 0)
+			goto fail;
+	}
 	if (!xSemaphoreTake(s_tts->started, pdMS_TO_TICKS(10000))) {
 		ESP_LOGE(TAG, "tts task-started timeout");
 		goto fail;
@@ -538,6 +573,8 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 		s_tts->feed_us = esp_timer_get_time();
 	if (text && text[0]) {
 		f = cont_task_build(s_tts->task_id, text);
+		if (!f)
+			return -3;
 		rc = esp_websocket_client_send_text(s_tts->ws, f,
 						    strlen(f),
 						    KS_TX_TIMEOUT_MS);
@@ -547,6 +584,8 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 	}
 	if (last) {
 		f = fin_task_build(s_tts->task_id);
+		if (!f)
+			return -3;
 		rc = esp_websocket_client_send_text(s_tts->ws, f,
 						    strlen(f),
 						    KS_TX_TIMEOUT_MS);
@@ -574,9 +613,12 @@ void ks_tts_close(void)
 {
 	if (!s_tts)
 		return;
+	s_tts->closing = true;
 	if (s_tts->ws) {
 		esp_websocket_client_close(s_tts->ws,
 					   pdMS_TO_TICKS(2000));
+		/* 等残余事件派发完再销毁（V-41 ASR 同款竞态实测） */
+		vTaskDelay(pdMS_TO_TICKS(50));
 		esp_websocket_client_destroy(s_tts->ws);
 	}
 	vSemaphoreDelete(s_tts->connected);

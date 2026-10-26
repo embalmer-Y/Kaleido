@@ -1,4 +1,5 @@
-idf_component_register(SRCS "voice_loop_main.c" "audio_io.c" "llm_stream.c" "wakenet_test.c"
+# llm_stream.c 已升格为 components/kaleido_speech/src/sp_llm.c（ks_llm_*）
+idf_component_register(SRCS "voice_loop_main.c" "audio_io.c" "wakenet_test.c"
                        INCLUDE_DIRS "."
                        EMBED_FILES "test_prompt.pcm"
                        PRIV_REQUIRES esp_wifi esp_netif esp_event nvs_flash
