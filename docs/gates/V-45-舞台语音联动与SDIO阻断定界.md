@@ -120,3 +120,61 @@ XFER=0 头补丁；announce 栈与 TLS 时序排查；上游 Cache_WriteBack 补
 
 **配置定稿（当前已提交态）**：64B 行 + hosted PSRAM 池 + 预留池 8K +
 LVGL 16K 栈 + 舞台 24fps + 探针缓冲运行期 PSRAM。
+
+---
+
+## 追记 #2（2026-10-26 深夜）：第二阻断攻破 + 频闪取证 + 内存清单
+
+### 第二阻断：根因与修复（已验证）
+
+**内存压力说证伪**：探针缓冲 5×32KB 静态→运行期 PSRAM（+160KB）+
+`sw_rotate=false`（+2MB PSRAM）后，boot 101k→**283k**、pre-wifi
+46k→**227k**，'W' 仍秒死（`rst:0x7`，连 IRAM panic 处理器都未及运行
+——CONFIG_ESP_PANIC_HANDLER_IRAM=y 已开）。死点不在 TLS，在更早。
+
+**二分定界**：'w'（仅加载 wakenet，无播报）同样秒死 → 凶手在
+`esp_srmodel_init/create_from_config`；voice-loop 单机版同路径 30 轮
+全过 → 差异变量 = **显示管线活着**（DPI DMA 扫描 + LVGL 刷新 + 舞台
+线程）。'X' 关 DPI 探针本身有竞态（菜单线程裸调 disp_on_off × LVGL
+draw_bitmap），弃用。
+
+**根因**：wakenet 加载（mmap 闪存模型填充 + 大量 PSRAM 分配）× 显示
+管线并发（LVGL flush 的 FB `esp_cache_msync` 回写 × DPI 扫描）→
+缓存维护路径自旋锁互卡 → 双核死锁 → 3s INT-WDT panic 亦无法打印 →
+HP WDT 静默复位。与上游 #167（Cache_WriteBack_Addr 线程不安全）同族。
+
+**修复（wakenet_start 隔离包装）**：加载期间 ①冻结 thorvg 舞台线程
+（lottie_stage_freeze）②持 LVGL 互斥（干净停刷新，无竞态）。DPI 扫描
+仍在跑——若后续仍死则指向扫描层（届时再细化）。
+
+**验证**：'w' 完整加载（分段打印全程 rc=0，模型 wn9_nihaoxiaozhi_tts，
+int −6KB / PSRAM −393KB）；'W' 9 轮 TTS 播报全过零锁死；'C' 浸泡
+200s 9+ 轮零复位；`VL,HEAP,OK` 巡检持续干净。
+
+### 频闪取证（用户报"动画一直在频闪"）
+
+| 发现 | 证据 | 处置 |
+|---|---|---|
+| **开机白闪成分**：LVGL 默认屏（#F7F7F7，RGB565=F7BE）先进 fb0 | 转储实证 fb0 整片 F7BE / fb1 全黑（calloc 初值）恰在 boot 早期 | ✅ 修复：默认屏压产品底色 + 背光推迟到舞台屏就绪后 |
+| 复位引发的全屏闪烁 | 每次 HP WDT 复位 = 黑屏→白闪→恢复 | 第二阻断修复后复位源消失（见下"串口 artifact"） |
+| **宿主侧 artifact**：PC 开关串口会使板子复位（CH343 DTR 毛刺） | 两次"自发复位"均发生在我方脚本 close/open 串口瞬间；7min 稳定连接 + 200s 浸泡零复位 | 取证纪律：监听窗口不关闭串口 |
+| 持续频闪（运行时） | 修复版 FB 内联采样（STAT 心跳 y300/y600 × 双 fb）25s+ 全程同步无分叉 | **待用户目验复判**；仪器持续在岗 |
+| 旧版曾见 fb0 舞台区整片纯白（修复前采样） | run2 采样实证 | 未再复现；若复发 FB 采样会捕获 |
+
+### 新增开放项（移交后续会话）
+
+1. **采音所有权调度缺陷族**：aio_capture 全程持锁 + feed_task 高优先级
+   紧循环 → 低优先级消费者饿死（'l' 环回 capture=0 实证）；浸泡轮
+   speech_ms=0（VAD 全程静音）疑同族但 el_ms=9444 表明 convo 采到了
+   数据——机理待 V-46 采音所有权重构（单一分发任务）时一并解决。
+   'a' 声学轮证明 wakenet 加载态下麦克风+扬声器+过空链路全部正常
+   （air_snr_db=26.0）。
+2. **DashScope ASR 云侧失败**：'t'/'a' 均 asr_open（MiniMax TTS 同网
+   正常）——key 配额/有效期待查，非固件回归。
+3. 四态 soak 判定需 ASR 恢复后重跑。
+
+### 本轮资产
+
+- `docs/mem-2026-10-26-内存占用清单.md`（组件/符号/任务栈/台阶/杠杆全表）
+- FB 采样 + VL,HEAP 巡检 + wakenet 分段打印（常驻诊断仪表）
+- 'X' 探针已修安全（持 LVGL 锁再动面板）

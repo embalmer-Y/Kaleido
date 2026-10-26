@@ -30,6 +30,8 @@
 #include "lvgl.h"
 #include "thorvg_capi.h"
 
+#include "lottie_stage.h"
+
 extern esp_lcd_panel_handle_t lcd_panel;
 extern const char test_lottie_json_start[] asm("_binary_test_lottie_json_start");
 extern const char test_lottie_json_end[] asm("_binary_test_lottie_json_end");
@@ -242,6 +244,23 @@ static void stage_timer_cb(lv_timer_t *t)
 	}
 
 	if (++sec % 30 == 0) {
+		/* V-45 频闪取证：心跳内联采样两块 DPI fb 的背景行(y=300,
+		 * 应恒 10C5=0x101828)与舞台行(y=600)首像素。若两 fb 分叉
+		 * （一正常一纯白/纯黑）且屏幕交替扫描它们，即频闪本体 */
+		static uint16_t *s_fb0, *s_fb1;
+		void *fbs[2] = { 0 };
+
+		if (!s_fb0 && lcd_panel &&
+		    esp_lcd_dpi_panel_get_frame_buffer(lcd_panel, 2,
+				&fbs[0], &fbs[1]) == ESP_OK) {
+			s_fb0 = fbs[0];
+			s_fb1 = fbs[1];
+		}
+		if (s_fb0)
+			printf("DSI,STAGE,FB,y300=%04X/%04X,y600=%04X/%04X"
+			       "\r\n",
+			       s_fb0[300 * 800 + 440], s_fb1[300 * 800 + 440],
+			       s_fb0[600 * 800 + 440], s_fb1[600 * 800 + 440]);
 		printf("DSI,STAGE,STAT,render=%d,disp=%d,cb_ms=%.1f/%.1f\r\n",
 		       s_render_cnt, s_disp_cnt,
 		       (double)cb_sum / 30 / 1000.0, (double)cb_max / 1000.0);
@@ -250,6 +269,16 @@ static void stage_timer_cb(lv_timer_t *t)
 		s_disp_cnt = 0;
 		cb_sum = 0;
 		cb_max = 0;
+		/* 堆完整性巡检（~30s 一次）：'W' 硬锁死+fb 被整片涂白的
+		 * 头号假设是 PSRAM 堆越界写入；walk 两个堆，坏即打印 */
+		static int s_patrol;
+
+		if (++s_patrol % 20 == 0) {
+			bool ok = heap_caps_check_integrity_all(true);
+
+			printf("VL,HEAP,%s\r\n", ok ? "OK" : "CORRUPT");
+			fflush(stdout);
+		}
 	}
 }
 
@@ -297,6 +326,11 @@ static void stage_console_task(void *arg)
 		}
 	}
 	vTaskDelete(NULL);
+}
+
+void lottie_stage_freeze(bool frozen)
+{
+	s_frozen = frozen;
 }
 
 int lottie_stage_start(void)

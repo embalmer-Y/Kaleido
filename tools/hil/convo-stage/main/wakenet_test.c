@@ -21,7 +21,9 @@
 
 #include "audio_io.h"
 #include "convo_fsm.h"
+#include "esp_lvgl_port.h"
 #include "kaleido_speech.h"
+#include "lottie_stage.h"
 
 /* voice_loop_main.c 的 TTS PCM → 扬声器缓冲（s_pb）转发 */
 extern void on_tts_pcm(void *user, const uint8_t *pcm, size_t len);
@@ -163,12 +165,24 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	s_selftest = selftest;
 	s_on_wake = on_wake;
 
+	/* V-45 第二阻断隔离包装：死亡点在 srmodel_init/create_from_config
+	 * 且仅显示链活着时发生。加载期间 ①冻结 thorvg 舞台线程 ②持
+	 * LVGL 互斥（干净停掉 LVGL 任务刷新；DPI 扫描仍在跑，恰好把
+	 * "渲染并发"与"扫描并发"两个变量分开——若仍死则凶手在扫描层） */
+	bool lvgl_held = lvgl_port_lock(2000);
+
+	lottie_stage_freeze(true);
+	printf("VL,WN,STAGE,srmodel_begin\r\n");
+	fflush(stdout);
 	models = esp_srmodel_init("model");
+	printf("VL,WN,STAGE,srmodel_end,n=%d\r\n",
+	       models ? models->num : -1);
+	fflush(stdout);
 
 	if (!models || models->num == 0) {
 		printf("VL,WN,ERROR=no_model,check CONFIG_SR_WN_*\r\n");
 		fflush(stdout);
-		return;
+		goto out_unfreeze;
 	}
 	afe_config_t *cfg = afe_config_init("M", models, AFE_TYPE_SR,
 					    AFE_MODE_HIGH_PERF);
@@ -177,19 +191,31 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	cfg->aec_init = false;
 	cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 	cfg = afe_config_check(cfg);
-
+	printf("VL,WN,STAGE,handle_begin\r\n");
+	fflush(stdout);
 	s_afe = esp_afe_handle_from_config(cfg);
 	if (!s_afe) {
 		printf("VL,WN,ERROR=no_afe_handle\r\n");
 		fflush(stdout);
-		return;
+		goto out_unfreeze;
 	}
+	printf("VL,WN,STAGE,create_begin,int=%uk\r\n",
+	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >> 10));
+	fflush(stdout);
 	s_afe_data = s_afe->create_from_config(cfg);
+	printf("VL,WN,STAGE,create_end,rc=%d\r\n", s_afe_data ? 0 : -1);
+	fflush(stdout);
 	if (!s_afe_data) {
 		printf("VL,WN,ERROR=afe_create\r\n");
 		fflush(stdout);
-		return;
+		goto out_unfreeze;
 	}
+out_unfreeze:
+	lottie_stage_freeze(false);
+	if (lvgl_held)
+		lvgl_port_unlock();
+	if (!models || models->num == 0 || !s_afe || !s_afe_data)
+		return;
 	printf("VL,WN,INIT,ok,model=%s,int=-%uKB,ps=-%uKB\r\n",
 	       models->model_name[0] ? models->model_name[0] : "?",
 	       (unsigned)((i0 - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) >> 10),

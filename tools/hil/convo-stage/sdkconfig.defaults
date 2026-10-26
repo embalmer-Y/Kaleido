@@ -53,6 +53,8 @@ CONFIG_LV_FONT_MONTSERRAT_48=y
 # LV_USE_OS 与 esp_lvgl_port 信号机制不匹配（tick 通知死等）：关掉
 CONFIG_LV_USE_PERF_MONITOR=y
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+# panic 处理器驻 IRAM：'W' 族硬锁死不吐转储的取证前提（V-45）
+CONFIG_ESP_PANIC_HANDLER_IRAM=y
 # 运行时统计（'u' 键 vTaskGetRunTimeStats）
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 

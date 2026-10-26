@@ -191,19 +191,26 @@ static void tone_play_task(void *arg)
 	vTaskDelete(NULL);
 }
 
-/* 'p'：NS4150 使能脚（GPIO53）两种极性各放 1s 音，麦克风自动判别 */
+/* 'p'：NS4150 使能脚（GPIO53）两种极性各放 1s 音，麦克风自动判别。
+ * 32KB 级缓冲一律运行期 PSRAM——静态 .bss 会吃掉 160KB+ 内部 RAM
+ * （合并版重建时曾退回静态，V-45 内存清单实测抓回） */
 static void pa_polarity_probe(void)
 {
 	gpio_config_t g = {
 		.pin_bit_mask = 1ULL << 53,
 		.mode = GPIO_MODE_OUTPUT,
 	};
-	static int16_t capbuf[16000];
+	int16_t *capbuf = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
+	int16_t *tone = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
 
 	gpio_config(&g);
+	if (!capbuf || !tone) {
+		printf("VL,P,FAIL,oom\r\n");
+		fflush(stdout);
+		goto out;
+	}
 	for (int lvl = 1; lvl >= 0; lvl--) {
 		float bin, bin_lo;
-		static int16_t tone[16000];
 
 		for (size_t i = 0; i < 16000; i++)
 			tone[i] = (int16_t)(8000.0f *
@@ -230,6 +237,9 @@ static void pa_polarity_probe(void)
 		vTaskDelay(pdMS_TO_TICKS(200));
 	}
 	gpio_set_level(53, 1); /* 恢复驱动默认极性 */
+out:
+	heap_caps_free(capbuf);
+	heap_caps_free(tone);
 }
 
 /* 's'：SD 卡自检（slot0 IOMUX 39-44，与 C5 slot1 并行）：
@@ -337,10 +347,16 @@ out:
 
 static void loopback_tone(void)
 {
-	static int16_t silence[16000];
-	static int16_t capbuf[16000];
-	static int16_t tone[16000];
+	/* 同 pa_polarity_probe：探针缓冲运行期 PSRAM（3×32KB） */
+	int16_t *silence = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
+	int16_t *capbuf = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
+	int16_t *tone = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
 
+	if (!silence || !capbuf || !tone) {
+		printf("VL,L,FAIL,oom\r\n");
+		fflush(stdout);
+		goto out;
+	}
 	for (size_t i = 0; i < 16000; i++)
 		tone[i] = (int16_t)(8000.0f *
 				    sinf(2.0f * (float)M_PI * 1000.0f *
@@ -351,7 +367,7 @@ static void loopback_tone(void)
 	if (n_noise != 16000) {
 		printf("VL,L,FAIL,capture_noise=%d\r\n", n_noise);
 		fflush(stdout);
-		return;
+		goto out;
 	}
 	int rms_noise = rms_i16(silence, 16000);
 
@@ -362,7 +378,7 @@ static void loopback_tone(void)
 	if (n_sig != 16000) {
 		printf("VL,L,FAIL,capture_sig=%d\r\n", n_sig);
 		fflush(stdout);
-		return;
+		goto out;
 	}
 	int rms_sig = rms_i16(capbuf, 16000);
 	float bin = goertzel(capbuf, 16000, 1000.0f, 16000.0f);
@@ -378,6 +394,10 @@ static void loopback_tone(void)
 	       (bin > bin_lo * 2.5f &&
 		bin > bin_hi * 2.5f) ? "PASS" : "FAIL");
 	fflush(stdout);
+out:
+	heap_caps_free(silence);
+	heap_caps_free(capbuf);
+	heap_caps_free(tone);
 }
 
 /* 喇叭外放内置语音 + 同步采音 */
@@ -397,9 +417,12 @@ static int64_t s_listen_end;
 
 static void tts_listen_task(void *arg)
 {
-	static int16_t win[16000];
+	/* 采音窗 32KB 运行期 PSRAM（原静态 .bss，V-45 内存清单整改） */
+	int16_t *win = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
 
 	(void)arg;
+	if (!win)
+		vTaskDelete(NULL);
 	while (esp_timer_get_time() < s_listen_end) {
 		int n = aio_capture(win, 16000, 1500);
 
@@ -408,6 +431,7 @@ static void tts_listen_task(void *arg)
 		printf("VL,A,TTS_RMS,%d\r\n", rms_i16(win, n));
 		fflush(stdout);
 	}
+	heap_caps_free(win);
 	vTaskDelete(NULL);
 }
 
@@ -717,7 +741,9 @@ static esp_err_t app_lcd_init(void)
 	ESP_GOTO_ON_ERROR(esp_lcd_panel_init(lcd_panel), err, TAG, "init");
 	ESP_GOTO_ON_ERROR(esp_lcd_panel_disp_on_off(lcd_panel, true), err,
 			 TAG, "on");
-	bsp_lcd_backlight_set(1);
+	/* 背光不在此处开：LVGL 任务先起时会把默认屏（白底 #F7F7F7）刷进
+	 * fb0，此刻开背光=每次上电白屏一闪（用户报"频闪"成分之一）。
+	 * 推迟到 app_main 舞台深色屏加载完成后（V-45 取证实证） */
 	return ret;
 err:
 	if (lcd_panel)
@@ -754,7 +780,9 @@ static esp_err_t app_lvgl_init(void)
 		.flags = {
 			.buff_dma = false,
 			.buff_spiram = true,
-			.sw_rotate = true,
+			/* sw_rotate=false：本产品形态固定竖屏不旋转；true 会让
+			 * port 额外分配整屏旋转缓冲（实测 2MB PSRAM）纯浪费 */
+			.sw_rotate = false,
 			.swap_bytes = false,
 			.full_refresh = false,
 			/* 直接模式+防撕裂配对（V-35R 实测口径） */
@@ -1076,10 +1104,18 @@ void app_main(void)
 		ESP_LOGE(TAG, "lvgl lock fail");
 		return;
 	}
+	/* 默认屏先压成产品底色：lvgl_port_init 的 LVGL 任务此刻已可首刷，
+	 * 不压色则默认主题白底 #F7F7F7 先进 fb0（与背光时序双保险） */
+	lv_obj_set_style_bg_color(lv_screen_active(),
+				  lv_color_hex(0x101828), 0);
+	lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
 	/* 舞台先建屏（stage_start 内 lv_screen_load），表达环再挂活动屏 */
 	lottie_stage_start();
 	stage_express_init();
 	lvgl_port_unlock();
+	/* 深色舞台屏就绪后才开背光：开机全程无白闪（app_lcd_init 已不发
+	 * 背光使能，见其注释） */
+	bsp_lcd_backlight_set(1);
 
 	printf("VL,MEM,pre-wifi,int=%uk,ps=%uk\r\n",
 	       (unsigned)(heap_caps_get_free_size(
@@ -1260,12 +1296,18 @@ void app_main(void)
 			continue;
 		}
 		if (ch == 'X') {
-			/* V-45 判别探针：关/开 DPI 流 */
+			/* V-45 判别探针：关/开 DPI 流。必须持 LVGL 互斥：
+			 * 裸调与 LVGL 任务的 draw_bitmap 并发驱动面板，
+			 * 实测可当场硬锁死（HP WDT 无转储） */
 			static bool s_disp_off;
 
 			s_disp_off = !s_disp_off;
-			esp_lcd_panel_disp_on_off(lcd_panel, !s_disp_off);
-			bsp_lcd_backlight_set(!s_disp_off);
+			if (lvgl_port_lock(2000)) {
+				esp_lcd_panel_disp_on_off(lcd_panel,
+							  !s_disp_off);
+				bsp_lcd_backlight_set(!s_disp_off);
+				lvgl_port_unlock();
+			}
 			printf("VL,DISP,%s\r\n", s_disp_off ? "off" : "on");
 			fflush(stdout);
 			continue;
