@@ -50,5 +50,8 @@ SoftAP 热点态 bring-up 全部上板实证；手机真机走查留负责人验
   补 lwip 迷你 DNS 随 phase 2。
 - **开放 AP + 明文 HTTP**：V-1 安全口径（见 provision.c 头注）；
   产品化上 WPA2-PIN/HTTPS，登记于 M2 风险表。
-- **手机真机走查**（连 Kaleido-OOBE → 浏览器配置 → 保存重启）：
-  留负责人验收——开发机无 WiFi 网卡，只能做到 RPC 级 bring-up 实证。
+- **手机真机走查**：✅ **负责人验收通过（2026-10-26）**——出厂镜像
+  （CONFIG 凭据全空）上电进热点态 → 手机连 Kaleido-OOBE → 浏览器配置
+  全部密钥 → 保存重启 → `nvs_mask=0x7` 持久、MiniMax URL 从 NVS 的
+  JWT 解析成功、't' 内置轮全链通（asr 430ms / llm 954ms / 首音 3530ms，
+  全程零 CONFIG 后备）。设备自此运行在纯 BYOK 产品路径上。
