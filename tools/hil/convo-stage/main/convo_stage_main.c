@@ -1,5 +1,6 @@
 /*
- * voice_loop_main.c — M1.5 语音全链 HIL：采集→ASR→LLM 流式→TTS→播放
+ * convo_stage_main.c — V-45 舞台×语音联动 HIL（voice_loop_main ∪ dsi-lvgl）
+ * 语音链：采集→ASR→LLM 流式→TTS→播放 + 免按键会话状态机
  *
  * 目的：方案 v1.5 §6 M1.5 验收——P50<1.5s / P90<2.2s（采集结束→首音出声）。
  * 链路：串口 'g' 触发 → 30s 采音窗（边采边流式送 ASR）→ 定稿文本 →
@@ -22,8 +23,21 @@
 #include "audio_io.h"
 #include "clause_pump.h"
 #include "convo_fsm.h"
+/* 显示链（自 dsi-lvgl main.c 平移，V-45 合并） */
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "driver/sdmmc_host.h"
+#include "esp_check.h"
+#include "esp_lcd_mipi_dsi.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_ldo_regulator.h"
+#include "esp_lvgl_port.h"
+#include "jd9366_init_cmds.h"
+#include "lvgl.h"
+
+#include "esp_lcd_jd9366.h"
+#include "esp_lcd_touch_jd9366.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -40,8 +54,31 @@
 #include "provision.h"
 #include "sdkconfig.h"
 #include "sdmmc_cmd.h"
+#include "stage_express.h"
 
 #define CAP_SECONDS	30 /* 负责人要求：真人轮 30s 窗防错过（'t' 内置轮不受影响）*/
+
+/* ---- 显示链常量（dsi-lvgl 口径；时序勿随手改，见 V-36/V-38/V-39）---- */
+#define LCD_H_RES		800
+#define LCD_V_RES		1280
+#define LCD_DSI_LANE_MBPS	1500
+#define LCD_DPI_CLK_MHZ		76
+#define LCD_DSI_PHY_PWR_LDO_CHAN	3
+#define LCD_DSI_PHY_PWR_LDO_VOLTAGE_MV	2500
+#define LCD_BK_LIGHT_ON_LEVEL	1
+#define LCD_BK_LIGHT_OFF_LEVEL	!LCD_BK_LIGHT_ON_LEVEL
+#define LCD_PIN_NUM_BK_LIGHT	20
+#define LCD_PIN_NUM_RST		5	/* V-39：面板硬复位脚 */
+#define TOUCH_I2C_NUM		0
+#define TOUCH_I2C_CLK_HZ	400000
+#define TOUCH_I2C_SCL		(GPIO_NUM_8)
+#define TOUCH_I2C_SDA		(GPIO_NUM_7)
+#define TOUCH_PIN_RST		(GPIO_NUM_NC)
+#define TOUCH_PIN_INT		(GPIO_NUM_NC)
+
+esp_lcd_panel_handle_t lcd_panel = NULL;	/* lottie_stage 读 DPI fb 用 */
+static esp_lcd_panel_io_handle_t io_handle;
+static lv_display_t *lvgl_disp;
 #define CAP_CHUNK	1600 /* 100ms @16k              */
 #define ROUND_MAX	5
 
@@ -395,11 +432,14 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	       (unsigned)(total / 16000));
 	fflush(stdout);
 
-	/* ① 静默底噪（1s） */
-	static int16_t noise[16000];
+	/* ① 静默底噪（1s）——缓冲运行期 PSRAM（见 pa_polarity_probe 注） */
+	int16_t *noise = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
 
+	if (!noise)
+		return;
 	if (aio_capture(noise, 16000, 2000) == 16000)
 		rms_noise = rms_i16(noise, 16000);
+	heap_caps_free(noise);
 
 	/* ② 外放 + 同步采回 */
 	s_asr_text[0] = '\0';
@@ -591,6 +631,146 @@ static void dualtls_probe_task(void *arg)
 	fflush(stdout);
 	vTaskDelete(NULL);
 }
+
+/* ---- 显示链初始化（自 dsi-lvgl main.c 平移；V-45 合并）---- */
+
+static void bsp_dsi_phy_power_on(void)
+{
+	esp_ldo_channel_handle_t ldo = NULL;
+	esp_ldo_channel_config_t cfg = {
+		.chan_id = LCD_DSI_PHY_PWR_LDO_CHAN,
+		.voltage_mv = LCD_DSI_PHY_PWR_LDO_VOLTAGE_MV,
+	};
+
+	ESP_ERROR_CHECK(esp_ldo_acquire_channel(&cfg, &ldo));
+}
+
+static void bsp_lcd_backlight_set(uint32_t on)
+{
+	static bool s_cfg;
+
+	if (!s_cfg) {	/* 只配置一次：重复 gpio_config 触发冲突告警 */
+		gpio_config_t g = {
+			.mode = GPIO_MODE_OUTPUT,
+			.pin_bit_mask = 1ULL << LCD_PIN_NUM_BK_LIGHT,
+		};
+
+		gpio_config(&g);
+		s_cfg = true;
+	}
+	gpio_set_level(LCD_PIN_NUM_BK_LIGHT,
+		       on ? LCD_BK_LIGHT_ON_LEVEL : LCD_BK_LIGHT_OFF_LEVEL);
+}
+
+static esp_err_t app_lcd_init(void)
+{
+	esp_lcd_dsi_bus_handle_t bus = NULL;
+	esp_err_t ret = ESP_OK;
+
+	bsp_dsi_phy_power_on();
+	bsp_lcd_backlight_set(0);
+
+	esp_lcd_dsi_bus_config_t bus_cfg = {
+		.bus_id = 0,
+		.num_data_lanes = 2,
+		.lane_bit_rate_mbps = LCD_DSI_LANE_MBPS,
+	};
+	ESP_GOTO_ON_ERROR(esp_lcd_new_dsi_bus(&bus_cfg, &bus), err,
+			 TAG, "dsi bus");
+
+	esp_lcd_dbi_io_config_t dbi = JD9366_MIPI_PANEL_IO_DBI_CONFIG();
+	ESP_GOTO_ON_ERROR(esp_lcd_new_panel_io_dbi(bus, &dbi, &io_handle),
+			 err, TAG, "dbi io");
+
+	esp_lcd_dpi_panel_config_t dpi = {
+		.dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
+		.dpi_clock_freq_mhz = LCD_DPI_CLK_MHZ,
+		.virtual_channel = 0,
+		.in_color_format = LCD_COLOR_FMT_RGB565,
+		.num_fbs = 2,
+		.video_timing = {
+			.h_size = LCD_H_RES,
+			.v_size = LCD_V_RES,
+			.hsync_back_porch = 28,
+			.hsync_pulse_width = 8,
+			.hsync_front_porch = 40,
+			.vsync_back_porch = 20,
+			.vsync_pulse_width = 8,
+			.vsync_front_porch = 140,
+		},
+	};
+	jd9366_vendor_config_t vc = {
+		.init_cmds = lcd_init_cmds,
+		.init_cmds_size = lcd_init_cmds_size,
+		.mipi_config = { .dsi_bus = bus, .dpi_config = &dpi },
+	};
+	const esp_lcd_panel_dev_config_t pc = {
+		.reset_gpio_num = LCD_PIN_NUM_RST,
+		.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+		.bits_per_pixel = 16,
+		.vendor_config = &vc,
+	};
+	ESP_GOTO_ON_ERROR(esp_lcd_new_panel_jd9366(io_handle, &pc,
+						   &lcd_panel), err, TAG,
+			  "panel");
+	ESP_GOTO_ON_ERROR(esp_lcd_panel_reset(lcd_panel), err, TAG, "rst");
+	ESP_GOTO_ON_ERROR(esp_lcd_panel_init(lcd_panel), err, TAG, "init");
+	ESP_GOTO_ON_ERROR(esp_lcd_panel_disp_on_off(lcd_panel, true), err,
+			 TAG, "on");
+	bsp_lcd_backlight_set(1);
+	return ret;
+err:
+	if (lcd_panel)
+		esp_lcd_panel_del(lcd_panel);
+	if (io_handle)
+		esp_lcd_panel_io_del(io_handle);
+	if (bus)
+		esp_lcd_del_dsi_bus(bus);
+	return ret;
+}
+
+static esp_err_t app_lvgl_init(void)
+{
+	lvgl_port_cfg_t lc = {
+		.task_priority = 4,
+		/* 16384：64B 缓存行下内部余量复测中，先降栈排查 */
+		.task_stack = 4096 * 4,
+		.task_affinity = -1,
+		.task_max_sleep_ms = 500,
+		.timer_period_ms = 5,
+	};
+
+	ESP_RETURN_ON_ERROR(lvgl_port_init(&lc), TAG, "lvgl port");
+	lvgl_port_display_cfg_t dc = {
+		.io_handle = io_handle,
+		.panel_handle = lcd_panel,
+		.buffer_size = LCD_H_RES * LCD_V_RES,
+		.double_buffer = true,
+		.hres = LCD_H_RES,
+		.vres = LCD_V_RES,
+		.monochrome = false,
+		.color_format = LV_COLOR_FORMAT_RGB565,
+		.rotation = { 0 },
+		.flags = {
+			.buff_dma = false,
+			.buff_spiram = true,
+			.sw_rotate = true,
+			.swap_bytes = false,
+			.full_refresh = false,
+			/* 直接模式+防撕裂配对（V-35R 实测口径） */
+			.direct_mode = true,
+		},
+	};
+	lvgl_port_display_dsi_cfg_t dpi = { .flags.avoid_tearing = true };
+
+	lvgl_disp = lvgl_port_add_disp_dsi(&dc, &dpi);
+	ESP_RETURN_ON_FALSE(lvgl_disp, ESP_FAIL, TAG, "disp dsi");
+	return ESP_OK;
+}
+
+/* 触摸暂不初始化：联动形态无触摸交互，且其 I2C0 与 ES8311 同总线
+ * （共享方案已备：audio_io 的 aio_i2c_bus()）；触摸本体在 dsi-lvgl
+ * HIL 已验 */
 
 /* ---- WiFi（M1 已验证路径，最简 station）----
  * 凭据走取值链 NVS → CONFIG（HIL 开发后备）；netif/事件环由 app_main
@@ -878,21 +1058,43 @@ void app_main(void)
 	 * 有则连网，密钥缺口可随时经 'k'（浏览器）或串口后备补 */
 	bool oobe_ap = !s_wifi_ssid[0] || !s_wifi_pass[0];
 
+	printf("VL,MEM,boot,int=%uk,ps=%uk\r\n",
+	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+	fflush(stdout);
+	if (aio_init() != 0) {
+		ESP_LOGE(TAG, "aio fail");
+		return;
+	}
+	/* 初始化次序（V-45 实测定稿，勿随意调）：
+	 * ①aio 最先（I2S DMA 描述符需连续内部块，显示先起会碎片化堆）；
+	 * ②显示次之（LVGL 32K 任务栈此刻内部余量充足；OOBE 热点态同
+	 *   样有引导画面）；③wifi 最后（wakenet 必须更后，在 'w'/'c' 时）*/
+	ESP_ERROR_CHECK(app_lcd_init());
+	ESP_ERROR_CHECK(app_lvgl_init());
+	if (!lvgl_port_lock(10000)) {
+		ESP_LOGE(TAG, "lvgl lock fail");
+		return;
+	}
+	/* 舞台先建屏（stage_start 内 lv_screen_load），表达环再挂活动屏 */
+	lottie_stage_start();
+	stage_express_init();
+	lvgl_port_unlock();
+
+	printf("VL,MEM,pre-wifi,int=%uk,ps=%uk\r\n",
+	       (unsigned)(heap_caps_get_free_size(
+			  MALLOC_CAP_INTERNAL) / 1024),
+	       (unsigned)(heap_caps_get_free_size(
+			  MALLOC_CAP_SPIRAM) / 1024));
+	fflush(stdout);
+
 	if (oobe_ap) {
-		if (aio_init() != 0) {
-			ESP_LOGE(TAG, "aio fail");
-			return;
-		}
 		if (provision_ap_start() != 0) {
 			ESP_LOGE(TAG, "oobe ap fail（串口后备见文档）");
 			return;
 		}
 	} else {
 		wifi_start(s_wifi_ssid, s_wifi_pass);
-		if (aio_init() != 0) {
-			ESP_LOGE(TAG, "aio fail");
-			return;
-		}
 	}
 
 	/* MiniMax 优先（URL 内嵌 GroupID，由组件解析 JWT 拼好）；
@@ -1055,6 +1257,17 @@ void app_main(void)
 			fflush(stdout);
 			xTaskCreatePinnedToCore(dualtls_probe_task, "p_asr",
 						16384, NULL, 5, NULL, 0);
+			continue;
+		}
+		if (ch == 'X') {
+			/* V-45 判别探针：关/开 DPI 流 */
+			static bool s_disp_off;
+
+			s_disp_off = !s_disp_off;
+			esp_lcd_panel_disp_on_off(lcd_panel, !s_disp_off);
+			bsp_lcd_backlight_set(!s_disp_off);
+			printf("VL,DISP,%s\r\n", s_disp_off ? "off" : "on");
+			fflush(stdout);
 			continue;
 		}
 		if (ch == 'n' || ch == 'N') {
