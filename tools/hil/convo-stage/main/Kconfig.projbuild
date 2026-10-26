@@ -1,0 +1,19 @@
+menu "voice-loop HIL"
+
+config VL_WIFI_SSID
+	string "WiFi SSID"
+	default ""
+
+config VL_WIFI_PASS
+	string "WiFi password"
+	default ""
+
+config VL_DS_KEY
+	string "DashScope API key"
+	default ""
+
+config VL_LLM_KEY
+	string "LLM API key (compatible-mode, may equal DS key)"
+	default ""
+
+endmenu

@@ -1,0 +1,18 @@
+dependencies:
+  idf: ">=5.3"
+  ## 显示链（dsi-lvgl 口径）
+  espressif/esp_lvgl_port:
+    version: 2.7.*
+    public: true
+  lvgl/lvgl:
+    version: 9.4.*
+    public: true
+  # 30fps 需 1.1.2 光栅化速度；pthread 渲染 + LVGL 合成并行（V-35R）
+  espressif/thorvg: "^1.1.2"
+  ## 语音链（voice-loop-p4 口径）
+  espressif/esp_codec_dev: "1.6.2"
+  espressif/cjson: "^1.7"
+  espressif/esp_websocket_client: "^1.8"
+  # WiFi 走 C5：host 组件版本与板上预烧 slave 严格同版（26 号 §2）
+  espressif/esp_hosted: "2.12.9"
+  espressif/esp-sr: "2.6.0"

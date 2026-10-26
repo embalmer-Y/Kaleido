@@ -1,0 +1,21 @@
+# V-45 合并工程（语音模块自 voice-loop-p4 平移；显示链自 dsi-lvgl 平移）：
+#   convo_stage_main.c  轮编排 + DSI/LVGL 初始化 + 表达桥接线
+#                      ⚠ 2026-10-26 SDIO 二分中被基线版覆盖，待按门禁
+#                        记录 §恢复配方重建（=基线 main + 显示段合并）
+#   stage_express.c     kaleido_express(L0) ↔ 舞台四态视觉桥
+#   lottie_stage.c      角色舞台（thorvg pthread + lv_canvas 合成）
+idf_component_register(SRCS "convo_stage_main.c" "stage_express.c" "lottie_stage.c"
+                              "audio_io.c" "wakenet_test.c" "provision.c"
+                              "clause_pump.c" "convo_fsm.c"
+                       INCLUDE_DIRS "."
+                       EMBED_FILES "assets/test_lottie.json" "test_prompt.pcm"
+                       PRIV_REQUIRES esp_wifi esp_netif esp_event nvs_flash
+                                     esp_http_client esp_http_server esp_timer
+                                     esp_codec_dev espressif__cjson
+                                     esp_driver_i2s esp_driver_i2c
+                                     esp_lcd esp_driver_gpio esp_driver_jpeg
+                                     esp_hw_support
+                                     esp_lvgl_port lvgl
+                                     esp_lcd_jd9366 esp_lcd_touch_jd9366
+                                     kaleido_speech kaleido_secret kaleido_express
+                                     fatfs sdmmc espressif__esp-sr)
