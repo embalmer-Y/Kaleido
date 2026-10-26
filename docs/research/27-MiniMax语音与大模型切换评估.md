@@ -55,3 +55,32 @@
   或在现有 ws 层并列适配；`ks_llm` 加 provider 开关（dashscope/minimax）
 - HIL `voice-loop-p4` 加模式切换验证：minimax 链整轮板测 + 真人听感
 - `sdkconfig.local`（gitignore）加 MiniMax key 引用，与阿里 key 同规矩
+
+---
+
+## 落地实录（V-41 续，同日完成切换）
+
+**模型终选（全部实测）**：LLM = `MiniMax-M3` + `thinking disabled`（首子句
+0.57-1.19s）；TTS = `speech-2.5-hd-preview`（HD 档还最快，首音 0.23s）。
+**M3.1-Flash 被 API 锁死自适应思考**（显式报错 2013："requires adaptive
+thinking; disabled is not allowed"），首子句 1.55-2.4s，提示词压不住
+（思考仍 300-400 字）——登记为未来"深思模式"开关，不作对话主力。
+
+**线上报文形态（写适配器前必读）**：
+- chatcompletion_v2 关思考只发 **4 行 SSE**，末行把整段回复+usage 打包
+  （实测 702B，回复越长越长）——行缓冲必须 ≥2KB
+- t2a_v2 末事件 `status=2` 的 audio 字段是**全量重复**（hex 长度=增量之和），
+  必须按 status 裁决下发/丢弃，否则每段播两遍
+
+**落地途中修掉的四个真 bug**（每个都有崩溃现场或可闻症状）：
+1. llm auth 头缓冲 192B 截断 690B JWT → 401 静默失败
+2. t2a_v2 全量重复事件未丢弃 → 用户耳朵抓到"每小段重复一遍"
+3. 702B 超长 SSE 行 × line[512] 无条件 memcpy → 栈被 JSON 砸穿 →
+   PC 跳进 JSON 字节执行（Instruction access fault，回复长度决定复现率）
+4. LLM 事件回调内嵌套 esp_http_client+TLS（~13KB 栈深+非重入）→
+   子句队列 + ttsfeed 任务解嵌套（附带 LLM 流与 TTS 取数并行）
+附：ASR ws 关闭竞态防御（closing 标志 + destroy 前让拍）；主任务栈 8K→16K
+
+**板端同网态 A/B**：minimax 首音 2.9-3.4s vs qwen 3.5-3.7s（测试时段网络
+被并发音频流挤占，绝对值偏大；干净时段云端段 1.07s vs 2.1s）。
+修复后 6 轮连测零崩溃。待办：干净网络复测分布 + 重复播放修复的真人听感。
