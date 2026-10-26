@@ -24,6 +24,8 @@
 #include "lvgl.h"
 #include "thorvg_capi.h"
 
+#include "bg_jpeg.h"
+
 extern esp_lcd_panel_handle_t lcd_panel;
 extern const char test_lottie_json_start[] asm("_binary_test_lottie_json_start");
 extern const char test_lottie_json_end[] asm("_binary_test_lottie_json_end");
@@ -258,20 +260,19 @@ int lottie_stage_start(void)
 	s_ready_idx = -1;
 
 	lv_obj_t *scr = lv_obj_create(NULL);
-	lv_obj_t *title = lv_label_create(scr);
 
+	/* V-36 产品定稿：纯色背景 + 角色（JPEG 硬解能力留在 bg_jpeg.c 待
+	 * 壁纸/相框场景启用；信息卡因后续可能换小屏而砍掉） */
 	lv_obj_set_style_bg_color(scr, lv_color_hex(0x101828), 0);
 	lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+	s_stage_timer = lv_timer_create(stage_timer_cb, 16, NULL);
 
 	s_img = lv_canvas_create(scr);
 	lv_canvas_set_buffer(s_img, s_buf[0], STAGE_W, STAGE_H,
 			     LV_COLOR_FORMAT_ARGB8888);
-	lv_obj_align(s_img, LV_ALIGN_CENTER, 0, 40);
-	lv_label_set_text(title, "Kaleido stage L0 (parallel 30fps)");
-	lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 16);
+	lv_obj_align(s_img, LV_ALIGN_CENTER, 0, 0);
 	lv_screen_load(scr);
-
-	s_stage_timer = lv_timer_create(stage_timer_cb, 16, NULL);
 
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, 64 * 1024);
