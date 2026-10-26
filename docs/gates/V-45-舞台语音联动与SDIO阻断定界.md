@@ -84,3 +84,39 @@ cache 布局变化）即改变系统画像，使 hosted SDIO 在 TLS 突发下�
 已达成：合并编译、完整启动、渲染预算、表达桥代码路径、kaleido_express
 L0 组件。用户曾报"频闪"（早期构建，当时表达环挂错屏+数组 ext_ram），
 最新配置未经用户目验——阻断解除后一并复验。
+
+
+---
+
+## 追记（2026-10-27 凌晨）：上游对照命中，SDIO 阻断已解，暴露第二阻断
+
+**上游搜索命中（负责人指示）**：esp-hosted-mcu 已知缺陷群（EHM-188
+跟踪体系），与我方症状精确对应的三条根因：
+
+1. **#219：PSRAM mempool + 128B 缓存行 → err 258**：TX 缓冲 1600B 步进，
+   1600 % 128 = 64，**隔一个缓冲即 DMA 非法**——外观"随机/间歇"。
+   确认修：`CONFIG_CACHE_L2_CACHE_LINE_64B=y`（社区实测 0 失败 vs 602）。
+   我方显示基线恰好带 128B（osptek 例程口径），叠加 hosted PSRAM 池
+   =教科书命中。这也解释了"显示组件参与链接即崩"的表象——真正的
+   载体是显示工程带来的 128B 配置。
+2. #167 追踪串（EHM-188）：CMD53 块模式 TX 缺陷（err 0x102，持续负载
+   后 DAT0 反同步），workaround=H_SDIO_TX_BLOCK_ONLY_XFER 0（备选）。
+3. Cache_WriteBack_Addr 线程安全缺陷（建议换 esp_cache_msync）。
+
+**实测结果（64B 修正 + 合并版 main 按恢复配方重建）**：
+- ✅ 合并应用**完整启动**：boot 101k → 舞台 24fps → KEX idle → wifi →
+  READY（64B 行消耗更多内部 tag RAM，boot 内部余量 288k→101k）；
+- ✅ **SDIO Unrecoverable / assert 954 全部消失**——#219 修法在我方
+  复现上有效，第一阻断确认解除；
+- ⚠ **第二阻断（新症状，独立缺陷）**：'W'/soak 的 announce TTS 段
+  **硬锁死**（HP_SYS_HP_WDT_RESET，无 Guru/abort 转储 = CPU 整体停摆），
+  发生于 pre-wifi 内部余量 46k 的 TLS 喷发路径。疑向：内部枯竭 ×
+  esp-aes DMA × 64B 组合（128B 时代同路径报 esp-aes 分配失败，64B 下
+  变硬锁）。
+
+**第二阻断候选杠杆（下会话）**：挤内部（stage 渲染 pthread 栈再降/
+PSRAM 栈、LVGL_PERF_MONITOR 关、探针更瘦）；H_SDIO_TX_BLOCK_ONLY_
+XFER=0 头补丁；announce 栈与 TLS 时序排查；上游 Cache_WriteBack 补丁。
+
+**配置定稿（当前已提交态）**：64B 行 + hosted PSRAM 池 + 预留池 8K +
+LVGL 16K 栈 + 舞台 24fps + 探针缓冲运行期 PSRAM。
