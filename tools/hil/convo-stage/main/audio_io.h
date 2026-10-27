@@ -28,4 +28,13 @@ int aio_capture_stream(int16_t *mono, size_t samples, uint32_t timeout_ms,
 /* 播放 mono 16k PCM（内部复制到双声道槽）；返回写入样本数 */
 int aio_play(const int16_t *mono, size_t samples, uint32_t timeout_ms);
 
+/* V-46b AEC 参考：绝对样本位置（TX 已写入 DMA 的累计帧数）与读取。
+ * 位置与 aio_capture_stream 游标同空间但不等相位——偏移实测（'R'） */
+uint32_t aio_ref_now(void);
+bool aio_ref_get(int16_t *out, size_t n, uint32_t pos);
+/* 跨步版：从 pos 起每 stride 样本取 1 写入 out（最多 n_out 个），
+ * 返回实际写入数；起点陈旧（落后半环）返回 0 */
+size_t aio_ref_get_strided(int16_t *out, size_t n_out, uint32_t pos,
+			   size_t stride);
+
 #endif /* VOICE_LOOP_P4_AUDIO_IO_H */

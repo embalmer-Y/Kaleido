@@ -72,9 +72,71 @@ static volatile uint32_t s_w;	/* 写游标（绝对值，单调） */
 static uint32_t s_r;		/* 读游标（消费者互斥下访问） */
 static portMUX_TYPE s_ring_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* V-46b AEC 参考环：aio_play 是唯一 TX 写者（TTS/beep/探针全过此口），
+ * 挂钩即全覆盖。与采音环同一 I2S0 时钟域（样本计数同速），但 TX DMA
+ * 深度（8×320=2560 帧）使"写入→出声"存在固有时延——读写偏移由
+ * aec_probe 的对齐实验实测（'R'），硬编码值仅作兜底 */
+#define AIO_REF_ORDER	19	/* 32.8s：相关对齐请求窗 8s 播放+8.3s 读取，
+				 * 须大于「半环守卫」能容纳的跨度 */
+#define AIO_REF_MASK	((1u << AIO_REF_ORDER) - 1)
+static int16_t *s_ref_ring;
+static volatile uint32_t s_ref_w;
+static portMUX_TYPE s_ref_mux = portMUX_INITIALIZER_UNLOCKED;
+
+uint32_t aio_ref_now(void)
+{
+	return s_ref_w;
+}
+
+/* 绝对位置读参考环：n 样本写入 [pos, pos+n) 到 out。位置落后超过半环
+ * （陈旧）返回 false，调用方按全零参考处理 */
+/* 跨步读取（每 stride 取 1 样本→out[k]）：V-46b 相关对齐用——
+ * 整块 272KB 拷贝与显示管线 esp_cache_msync 并发曾非确定停摆
+ * （回溯实证 memcpy 内挂死），紧凑跨步拷贝把 PSRAM 压力降 4 倍且
+ * 分块让出 */
+size_t aio_ref_get_strided(int16_t *out, size_t n_out, uint32_t pos,
+			   size_t stride)
+{
+	if (!s_ref_ring || !stride)
+		return 0;
+	uint32_t w = s_ref_w;
+
+	if (w - pos > (1u << (AIO_REF_ORDER - 1)))
+		return 0;
+	size_t k = 0;
+
+	for (size_t i = 0; i < n_out * stride; i += stride) {
+		uint32_t p = (pos + i) & AIO_REF_MASK;
+
+		out[k++] = s_ref_ring[p];
+	}
+	return k;
+}
+
+bool aio_ref_get(int16_t *out, size_t n, uint32_t pos)
+{
+	if (!s_ref_ring)
+		return false;
+	uint32_t w = s_ref_w;
+
+	if (w - pos > (1u << (AIO_REF_ORDER - 1)))
+		return false;
+	for (size_t off = 0; off < n; ) {
+		uint32_t p = (pos + off) & AIO_REF_MASK;
+		size_t m = n - off;
+
+		if (m > (uint32_t)(AIO_RING_MASK + 1) - p)
+			m = (uint32_t)(AIO_RING_MASK + 1) - p;
+		memcpy(out + off, s_ref_ring + p, m * sizeof(int16_t));
+		off += m;
+	}
+	return true;
+}
+
 static void cap_task(void *arg)
 {
 	static int16_t st[AIO_CAP_CHUNK * 2]; /* 立体声中转（左=奇? 左=偶） */
+	static uint8_t s_zero_run;	/* 连续 0 读计数（退避遥测用） */
 	size_t frames;
 
 	(void)arg;
@@ -92,8 +154,17 @@ static void cap_task(void *arg)
 			got += n;
 		}
 		frames = got / 4;
-		if (!frames)
+		if (!frames) {
+			/* 0 读退避：紧 continue 会以优先级 5 旋死核 0，
+			 * 饿死同核全部低优先级任务并连坐 IDLE0 触发
+			 * INT_WDT（V-46b 全案真凶——TWDT 现场实证）。
+			 * 常态下 RX 常有数据，此路径=异常/欠载 */
+			if (++s_zero_run == 100)
+				kf_ev("aio", "rx zero-run");
+			vTaskDelay(pdMS_TO_TICKS(10));
 			continue;
+		}
+		s_zero_run = 0;
 		/* 覆盖写：只推进写游标，落后读者按掉队策略自跳 */
 		portENTER_CRITICAL(&s_ring_mux);
 		for (size_t i = 0; i < frames; i++)
@@ -200,6 +271,10 @@ int aio_init(void)
 				  MALLOC_CAP_SPIRAM);
 	if (!s_ring)
 		return -6;
+	s_ref_ring = heap_caps_malloc((1u << AIO_REF_ORDER) *
+				      sizeof(int16_t), MALLOC_CAP_SPIRAM);
+	if (!s_ref_ring)
+		return -8;
 
 	esp_codec_dev_sample_info_t fs = {
 		.sample_rate = AIO_SR,
@@ -287,6 +362,13 @@ int aio_play(const int16_t *mono, size_t samples, uint32_t timeout_ms)
 			st[2 * i] = mono[done + i];
 			st[2 * i + 1] = mono[done + i];
 		}
+		/* V-46b：参考环镜像（本块即刻进入 TX DMA 深度队列） */
+		portENTER_CRITICAL(&s_ref_mux);
+		for (size_t i = 0; i < n; i++)
+			s_ref_ring[(s_ref_w + i) & AIO_REF_MASK] =
+				mono[done + i];
+		s_ref_w += n;
+		portEXIT_CRITICAL(&s_ref_mux);
 		size_t wrote = 0;
 
 		while (wrote < n * 4) {

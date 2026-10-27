@@ -56,6 +56,7 @@
 #include "sdmmc_cmd.h"
 #include "emote_stage.h"
 #include "kaleido_core.h"
+#include "aec_probe.h"
 #include "stage_express.h"
 
 #define CAP_SECONDS	30 /* 负责人要求：真人轮 30s 窗防错过（'t' 内置轮不受影响）*/
@@ -1193,7 +1194,7 @@ void app_main(void)
 	printf("VL,READY,keys: g=round t=embedded a=acoustic w=wakenet "
 	       "W=wn-selftest c=hands-free n=manual-wake C=auto-soak "
 	       "M=llm-toggle k=web-config o=ap-probe u=stats s=sd p=pa "
-	       "l=loopback e=emote-cycle (%d menu rounds)\r\n", ROUND_MAX);
+	       "l=loopback e=emote-cycle R=align Y=aec (%d menu rounds)\r\n", ROUND_MAX);
 	fflush(stdout);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
@@ -1210,6 +1211,23 @@ void app_main(void)
 		}
 		if (ch == 'l' || ch == 'L') {
 			loopback_tone();
+			continue;
+		}
+		if (ch == 'R') {
+			/* V-46b：参考/麦对齐测量（AEC 前置必跑） */
+			aec_align_probe();
+			continue;
+		}
+		if (ch == 'Y') {
+			/* V-46b：AEC 抑制测量 + 成本审计 */
+			if (s_busy || wakenet_selftest_busy()) {
+				printf("VL,BUSY\r\n");
+				fflush(stdout);
+				continue;
+			}
+			s_busy = true;
+			aec_probe_run();
+			s_busy = false;
 			continue;
 		}
 		if (ch == 'e') {
