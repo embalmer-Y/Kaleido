@@ -349,7 +349,10 @@ int emote_stage_start(void)
 		 * （实测卡顿主因）；3 片/帧后 LVGL 重绘次数同步降一个量级 */
 		.buffers = { .buf_pixels = STAGE_W * 109 },
 		.task = { .task_priority = 5, .task_stack = 6 * 1024,
-			  .task_affinity = -1,
+			  /* 钉核 1：EAF 解码吃满单核（~95%），曾把核 0 的
+			   * IDLE0/音频节拍挤到 TWDT 报警、wakenet 失聪
+			   * （V-46c 真人测试日定位） */
+			  .task_affinity = 1,
 			  /* V-46c 内存布局：gfx 渲染栈进 PSRAM（组件原生
 			   * 选项），内部 RAM 留给 DMA/驱动 */
 			  .task_stack_in_ext = true },

@@ -74,6 +74,7 @@ static void feed_task(void *arg)
 		return;
 	}
 	kf_log("VL,WN,FEED,chunk=%d\r\n", chunk);
+	uint32_t feed_dbg = 0;
 	/* 核 0 喂音 / 核 1 检测（创建处绑核）。静音窗口恢复（V-46c
 	 * 回退）：AEC 驻留被 esp-sr AEC3 FFT 病理阻断（追记#7），
 	 * 自唤醒免疫暂由静音窗承担；AEC 修复后撤窗换打断监听 */
@@ -85,6 +86,16 @@ static void feed_task(void *arg)
 
 		if (n < chunk)
 			memset(buf + n, 0, (chunk - n) * sizeof(int16_t));
+		/* 调试仪表：喂入侧 RMS（与 detect 侧 DBGVOL 对账，分界
+		 * AFE 内外） */
+		if (kf_dbg_get() && ++feed_dbg % 25 == 0) {
+			int64_t sq = 0;
+
+			for (int i = 0; i < n; i++)
+				sq += (int32_t)buf[i] * buf[i];
+			kf_log("WN,DBGIN,n=%d,rms=%.1f", n,
+			       n ? sqrtf((float)sq / n) : 0.0f);
+		}
 		s_afe->feed(s_afe_data, buf);
 	}
 }
@@ -92,10 +103,19 @@ static void feed_task(void *arg)
 static void detect_task(void *arg)
 {
 	(void)arg;
+	uint32_t dbg_n = 0;
+
 	for (;;) {
 		afe_fetch_result_t *r = s_afe->fetch(s_afe_data);
 
-		if (!r || r->wakeup_state != WAKENET_DETECTED)
+		if (!r)
+			continue;
+		/* 调试仪表（'v' 态）：每 50 块报 wakenet 实际听到的响度，
+		 * 区分"音频未达检测"与"模型不识别" */
+		if (kf_dbg_get() && ++dbg_n % 50 == 0) {
+			kf_log("WN,DBGVOL,vol=%.1f", r->data_volume);
+		}
+		if (r->wakeup_state != WAKENET_DETECTED)
 			continue;
 		int64_t lat = s_speak_us ?
 			(esp_timer_get_time() - s_speak_us) / 1000 : -1;
@@ -226,7 +246,9 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 
 	cfg->aec_init = false;
 	cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
-	cfg = afe_config_check(cfg);
+	/* 无 afe_config_check：V-40 实证 9/10 命中的原版路径未调用它，
+	 * 其"修正"在本板配置下会破坏唤醒检测（V-46c 真人测试日 diff
+	 * 定位——与原版唯一实质差异即此行） */
 	kf_log("VL,WN,STAGE,handle_begin\r\n");
 	s_afe = esp_afe_handle_from_config(cfg);
 	if (!s_afe) {
@@ -265,8 +287,10 @@ out_unfreeze:
 				sinf(2.0f * (float)M_PI * 880.0f * (float)i /
 				     16000.0f));
 
-	xTaskCreatePinnedToCore(feed_task, "wn_feed", 4096, NULL, 5, NULL, 0);
-	xTaskCreatePinnedToCore(detect_task, "wn_det", 8192, NULL, 5, NULL, 1);
+	/* 优先级 6 > gfx(5)：音频喂入/检测是墙钟节拍路径，EAF 渲染
+	 * 不得挤压（V-46c 真人测试日：核 0 被 EAF 吃满致 wakenet 失聪） */
+	xTaskCreatePinnedToCore(feed_task, "wn_feed", 4096, NULL, 6, NULL, 0);
+	xTaskCreatePinnedToCore(detect_task, "wn_det", 8192, NULL, 6, NULL, 1);
 	if (selftest)
 		/* 10240 栈：与 ttsfeeder 同款——announce 内跑完整
 		 * MiniMax HTTPS+TLS（esp_http_client+mbedtls） */

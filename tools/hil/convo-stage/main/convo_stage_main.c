@@ -1073,13 +1073,30 @@ static void creds_resolve(void)
 	       s_mm_key_buf[0] ? "y" : "n");
 }
 
+/* 会话配置（文件作用域：app_main 与 wake_handler 共用） */
+static struct ks_asr_cfg asr = {
+	.url = "wss://dashscope.aliyuncs.com",
+	.model = "paraformer-realtime-v2",
+	.sample_rate = 16000,
+};
+
+/* V-46c 产品行为：声学唤醒时若 FSM 未启动则自动开会话——用户预期
+ * "说唤醒词=开始倾听"（曾因 FSM OFF 丢事件被真人测试抓到：只鸣笛
+ * 不倾听）。tts/llm 在 app_main 内定义为 static，经 extern 链接 */
+static struct ks_tts_cfg *wake_tts;
+static struct ks_llm_cfg *wake_llm;
+
+static void wake_handler(void)
+{
+	if (!convo_active()) {
+		if (convo_start(&asr, wake_tts, wake_llm))
+			kf_log("VL,CONVO,AUTOSTART");
+	}
+	convo_notify_wake();
+}
+
 void app_main(void)
 {
-	static struct ks_asr_cfg asr = {
-		.url = "wss://dashscope.aliyuncs.com",
-		.model = "paraformer-realtime-v2",
-		.sample_rate = 16000,
-	};
 	/* V-41：TTS/LLM 切 MiniMax（ASR 留百炼 paraformer-realtime-v2）。
 	 * 模型选型实测见 docs/research/27：M3 关思考=旗舰质量+首子句 ~0.7s；
 	 * speech-2.5-hd-preview=HD 质量档且首音最快（~0.25s） */
@@ -1089,6 +1106,8 @@ void app_main(void)
 		.voice = CONFIG_KS_TTS_MM_VOICE,
 		.sample_rate = 16000,
 	};
+
+
 	static struct ks_llm_cfg llm = {
 		.url = "https://dashscope.aliyuncs.com/"
 		       "compatible-mode/v1/chat/completions",
@@ -1098,6 +1117,9 @@ void app_main(void)
 		.user_msg = "",
 		.cut_clauses = true, /* M1.5：子句级切送，首音不等句号 */
 	};
+
+	wake_tts = &tts;
+	wake_llm = &llm;
 
 	kf_init();		/* 框架最先：崩溃取证回放在任何业务日志前 */
 	esp_log_level_set("*", ESP_LOG_WARN);
@@ -1203,9 +1225,8 @@ void app_main(void)
 	if (pump_init() != 0)
 		return;
 
-	/* V-46c：语音前端常驻（"MR"+AEC，撤静音窗）——产品形态开机即
-	 * 听，打断与自唤醒免疫均由 AEC 链承担 */
-	wakenet_start(&tts, false, convo_notify_wake);
+	/* V-46c：语音前端常驻（产品形态开机即听）。唤醒=自动开会话 */
+	wakenet_start(&tts, false, wake_handler);
 
 	kf_log("VL,READY,keys: g=round t=embedded a=acoustic w=wakenet "
 	       "W=wn-selftest c=hands-free n=manual-wake C=auto-soak "
@@ -1306,14 +1327,14 @@ void app_main(void)
 			if (ch == 'C') {
 				/* 自驱回归：TTS 过空气喊唤醒词+提问，
 				 * N 轮无人值守（V-43 门禁判据） */
-				wakenet_start(&tts, false, convo_notify_wake);
+				wakenet_start(&tts, false, wake_handler);
 				convo_start(&asr, &tts, &llm);
 				kf_log("VL,CONVO,SOAK,START,n=10\r\n");
 				convo_soak_start(10);
 				continue;
 			}
 			if (!convo_active()) {
-				wakenet_start(&tts, false, convo_notify_wake);
+				wakenet_start(&tts, false, wake_handler);
 				if (!convo_start(&asr, &tts, &llm)) {
 					kf_log("VL,CONVO,START,fail\r\n");
 					continue;
@@ -1374,6 +1395,14 @@ void app_main(void)
 		}
 		if (ch == 'w') {
 			wakenet_start(&tts, false, NULL);
+			continue;
+		}
+		if (ch == 'v' || ch == 'V') {
+			/* KF 调试模式：全局 DEBUG 级 + KF 流上屏 + 诊断
+			 * 仪表（FB 采样/DBGVOL）随动；发布态安静串口 */
+			bool on = kf_dbg_toggle();
+
+			kf_log("VL,DBG,%s", on ? "on" : "off");
 			continue;
 		}
 		if (ch == 'u') {

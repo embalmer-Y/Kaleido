@@ -290,7 +290,9 @@ int aio_init(void)
 		.channel = 2,
 		.bits_per_sample = 16,
 	};
-	esp_codec_dev_set_in_gain(s_in, 30.0); /* 硅麦；首验后标定 */
+	/* 增益 42（V-46c：量化 wakenet9 对静音敏感，30→42 提升检测
+	 * 置信度；ASR 侧 paraformer 鲁棒不受影响） */
+	esp_codec_dev_set_in_gain(s_in, 42.0);
 	esp_codec_dev_set_out_vol(s_out, 60.0);
 	esp_codec_dev_open(s_in, &fs);
 	esp_codec_dev_open(s_out, &fs);
