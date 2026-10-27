@@ -284,7 +284,7 @@ static void convo_task(void *arg)
 
 			t_last = esp_timer_get_time();
 			s_round_cnt++;
-			printf("VL,CONVO,ROUND,n=%d,rc=%d,speech_ms=%lld,"
+			kf_log("VL,CONVO,ROUND,n=%d,rc=%d,speech_ms=%lld,"
 			       "asr_len=%d,cut2audio_ms=%lld,el_ms=%lld,"
 			       "int=%uk,ps=%uk\r\n",
 			       s_round_cnt, rc, speech_ms,
@@ -293,7 +293,6 @@ static void convo_task(void *arg)
 					  MALLOC_CAP_INTERNAL) / 1024),
 			       (unsigned)(heap_caps_get_free_size(
 					  MALLOC_CAP_SPIRAM) / 1024));
-			fflush(stdout);
 	kf_ev("convo", "round rc=%d ms=%lld", rc, el / 1000);
 		}
 		s_state = CONVO_IDLE;
@@ -378,8 +377,7 @@ static void soak_task(void *arg)
 
 	for (int k = 0; k < rounds && s_on; k++) {
 		if (!wait_state(CONVO_IDLE, 15000)) {
-			printf("VL,CONVO,SOAK,k=%d,st=timeout\r\n", k);
-			fflush(stdout);
+			kf_log("VL,CONVO,SOAK,k=%d,st=timeout\r\n", k);
 			continue;
 		}
 		vTaskDelay(pdMS_TO_TICKS(300));
@@ -387,8 +385,7 @@ static void soak_task(void *arg)
 		if (!wait_state(CONVO_LISTENING, 8000)) {
 			/* 声学 miss（环境噪声/音量所致）→ 合成唤醒兜底：
 			 * 轮机制与声学检出解耦验证；命中数如实分列 */
-			printf("VL,CONVO,SOAK,k=%d,wake=synth\r\n", k);
-			fflush(stdout);
+			kf_log("VL,CONVO,SOAK,k=%d,wake=synth\r\n", k);
 			convo_notify_wake();
 			if (!wait_state(CONVO_LISTENING, 3000))
 				continue;
@@ -400,12 +397,10 @@ static void soak_task(void *arg)
 		play_prompt_question();		/* 提问=内置语音（见上注） */
 		questions++;
 		wait_state(CONVO_IDLE, 60000);		/* 等本轮完成 */
-		printf("VL,CONVO,SOAK,k=%d,done\r\n", k);
-		fflush(stdout);
+		kf_log("VL,CONVO,SOAK,k=%d,done\r\n", k);
 	}
-	printf("VL,CONVO,SOAK,DONE,wake_hits=%d,synth=%d/%d,asked=%d\r\n",
+	kf_log("VL,CONVO,SOAK,DONE,wake_hits=%d,synth=%d/%d,asked=%d\r\n",
 	       hits, synth, rounds, questions);
-	fflush(stdout);
 	vTaskDelete(NULL);
 }
 

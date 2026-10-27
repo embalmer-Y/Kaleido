@@ -69,13 +69,11 @@ static void feed_task(void *arg)
 
 	(void)arg;
 	if (!buf) {
-		printf("VL,WN,ERROR=feed_alloc\r\n");
-		fflush(stdout);
+		kf_log("VL,WN,ERROR=feed_alloc\r\n");
 		vTaskDelete(NULL);
 		return;
 	}
-	printf("VL,WN,FEED,chunk=%d\r\n", chunk);
-	fflush(stdout);
+	kf_log("VL,WN,FEED,chunk=%d\r\n", chunk);
 	/* 核 0 喂音 / 核 1 检测（创建处绑核）。静音窗口恢复（V-46c
 	 * 回退）：AEC 驻留被 esp-sr AEC3 FFT 病理阻断（追记#7），
 	 * 自唤醒免疫暂由静音窗承担；AEC 修复后撤窗换打断监听 */
@@ -109,9 +107,8 @@ static void detect_task(void *arg)
 			 * 切写 + pb 排干）+ 唤醒事件（轮收尾回 IDLE 后
 			 * 即开 LISTENING）。≤1s 停播转听门禁 */
 			pb_abort_playback();
-			printf("VL,WN,BARGE,cnt=%d,vol=%.1f\r\n",
+			kf_log("VL,WN,BARGE,cnt=%d,vol=%.1f\r\n",
 			       s_wake_cnt, r->data_volume);
-			fflush(stdout);
 			kf_ev("wn", "barge-in");
 			if (s_on_wake)
 				s_on_wake();
@@ -119,9 +116,8 @@ static void detect_task(void *arg)
 		}
 		if (st == CONVO_LISTENING || st == CONVO_THINKING)
 			continue;	/* 会话进行中命中：防重触发 */
-		printf("VL,WN,WAKE,cnt=%d,lat_ms=%lld,vol=%.1f\r\n",
+		kf_log("VL,WN,WAKE,cnt=%d,lat_ms=%lld,vol=%.1f\r\n",
 		       s_wake_cnt, lat, r->data_volume);
-		fflush(stdout);
 		if (s_on_wake)
 			s_on_wake();	/* 通知 FSM（免按键轮起点） */
 		xTaskCreatePinnedToCore(beep_play_task, "beep", 4096,
@@ -142,13 +138,11 @@ static void announce_task(void *arg)
 		if (ks_tts_open(cfg, &(struct ks_tts_events){
 				.on_pcm = on_tts_pcm,
 			}) != 0) {
-			printf("VL,WN,ERROR=tts_open,i=%d\r\n", i);
-			fflush(stdout);
+			kf_log("VL,WN,ERROR=tts_open,i=%d\r\n", i);
 			vTaskDelay(pdMS_TO_TICKS(3000));
 			continue;
 		}
-		printf("VL,WN,SPEAK,i=%d\r\n", i);
-		fflush(stdout);
+		kf_log("VL,WN,SPEAK,i=%d\r\n", i);
 		s_speak_us = esp_timer_get_time();
 		ks_tts_feed("你好小智", false, 15000);
 		ks_tts_feed(NULL, true, 15000);
@@ -158,9 +152,8 @@ static void announce_task(void *arg)
 	vTaskDelay(pdMS_TO_TICKS(1500));	/* 等尾音抵达检测 */
 	/* hits 语义（V-46c 反转）：设备自说的唤醒词应被 AEC 抑制，
 	 * hits=自唤醒泄漏率，越低越好（门禁 ≤1/10） */
-	printf("VL,WN,SELFTEST,done,hits=%d/%d,leak=lower-better\r\n",
+	kf_log("VL,WN,SELFTEST,done,hits=%d/%d,leak=lower-better\r\n",
 	       s_wake_cnt - hits0, cycles);
-	fflush(stdout);
 	s_selftest = false;
 	vTaskDelete(NULL);
 }
@@ -190,12 +183,10 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 			kf_task_psram("wn_say", 10240, announce_task, tts,
 				      4, 0, (void **)&s_say_stk,
 				      &s_say_tcb);
-			printf("VL,WN,LISTENING,selftest\r\n");
-			fflush(stdout);
+			kf_log("VL,WN,LISTENING,selftest\r\n");
 			return;
 		}
-		printf("VL,WN,ALREADY_RUNNING\r\n");
-		fflush(stdout);
+		kf_log("VL,WN,ALREADY_RUNNING\r\n");
 		return;
 	}
 	s_running = true;
@@ -211,22 +202,18 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 		/* 隔离降级不许静默：记日志后中止本次加载（渲染未停就跑
 		 * 模型加载=重蹈 V-45 缓存维护死锁——宁可让用户重按） */
 		kf_ev("wn", "pause_timeout");
-		printf("VL,WN,ERROR=emote_pause_timeout\r\n");
-		fflush(stdout);
+		kf_log("VL,WN,ERROR=emote_pause_timeout\r\n");
 		s_running = false;
 		return;
 	}
 	bool lvgl_held = lvgl_port_lock(2000);
-	printf("VL,WN,STAGE,srmodel_begin\r\n");
-	fflush(stdout);
+	kf_log("VL,WN,STAGE,srmodel_begin\r\n");
 	models = esp_srmodel_init("model");
-	printf("VL,WN,STAGE,srmodel_end,n=%d\r\n",
+	kf_log("VL,WN,STAGE,srmodel_end,n=%d\r\n",
 	       models ? models->num : -1);
-	fflush(stdout);
 
 	if (!models || models->num == 0) {
-		printf("VL,WN,ERROR=no_model,check CONFIG_SR_WN_*\r\n");
-		fflush(stdout);
+		kf_log("VL,WN,ERROR=no_model,check CONFIG_SR_WN_*\r\n");
 		goto out_unfreeze;
 	}
 	/* AEC 驻留挂起（V-46c）：esp-sr 预编译 AEC3 在真实参考数据下
@@ -240,23 +227,18 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	cfg->aec_init = false;
 	cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 	cfg = afe_config_check(cfg);
-	printf("VL,WN,STAGE,handle_begin\r\n");
-	fflush(stdout);
+	kf_log("VL,WN,STAGE,handle_begin\r\n");
 	s_afe = esp_afe_handle_from_config(cfg);
 	if (!s_afe) {
-		printf("VL,WN,ERROR=no_afe_handle\r\n");
-		fflush(stdout);
+		kf_log("VL,WN,ERROR=no_afe_handle\r\n");
 		goto out_unfreeze;
 	}
-	printf("VL,WN,STAGE,create_begin,int=%uk\r\n",
+	kf_log("VL,WN,STAGE,create_begin,int=%uk\r\n",
 	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >> 10));
-	fflush(stdout);
 	s_afe_data = s_afe->create_from_config(cfg);
-	printf("VL,WN,STAGE,create_end,rc=%d\r\n", s_afe_data ? 0 : -1);
-	fflush(stdout);
+	kf_log("VL,WN,STAGE,create_end,rc=%d\r\n", s_afe_data ? 0 : -1);
 	if (!s_afe_data) {
-		printf("VL,WN,ERROR=afe_create\r\n");
-		fflush(stdout);
+		kf_log("VL,WN,ERROR=afe_create\r\n");
 		goto out_unfreeze;
 	}
 out_unfreeze:
@@ -267,18 +249,16 @@ out_unfreeze:
 		return;
 	kf_ev("wn", "loaded int=-%uKB", (unsigned)(
 		      (i0 - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) >> 10));
-	printf("VL,WN,INIT,ok,model=%s,int=-%uKB,ps=-%uKB\r\n",
+	kf_log("VL,WN,INIT,ok,model=%s,int=-%uKB,ps=-%uKB\r\n",
 	       models->model_name[0] ? models->model_name[0] : "?",
 	       (unsigned)((i0 - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) >> 10),
 	       (unsigned)((p0 - heap_caps_get_free_size(MALLOC_CAP_SPIRAM)) >> 10));
-	fflush(stdout);
 
 	if (!s_beep)
 		s_beep = heap_caps_malloc(sizeof(int16_t) * 4800,
 					  MALLOC_CAP_SPIRAM);
 	if (!s_beep) {
-		printf("VL,WN,ERROR=beep_alloc\r\n");
-		fflush(stdout);
+		kf_log("VL,WN,ERROR=beep_alloc\r\n");
 	} else
 	for (size_t i = 0; i < 4800; i++)
 		s_beep[i] = (int16_t)(6000.0f *
@@ -292,6 +272,5 @@ out_unfreeze:
 		 * MiniMax HTTPS+TLS（esp_http_client+mbedtls） */
 		xTaskCreatePinnedToCore(announce_task, "wn_say", 10240, tts,
 					4, NULL, 0);
-	printf("VL,WN,LISTENING%s\r\n", selftest ? ",selftest" : "");
-	fflush(stdout);
+	kf_log("VL,WN,LISTENING%s\r\n", selftest ? ",selftest" : "");
 }

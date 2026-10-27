@@ -101,19 +101,17 @@ static int32_t corr_align(void)
 		aio_play(p + off, n, 1000);
 		esp_task_wdt_reset();
 		if ((off / 1600) % 16 == 0)
-			printf("VL,AEC,ALIGN,prog,off=%d,cap=%d,ms=%lld"
+			kf_log("VL,AEC,ALIGN,prog,off=%d,cap=%d,ms=%lld"
 			       "\r\n", (int)off, (int)c1,
 			       (esp_timer_get_time() - t0) / 1000);
 	}
-	fflush(stdout);
 	/* DMA 排空尾（≤160ms）也采进窗，保证参考窗尾覆盖播放结束 */
 	vTaskDelay(pdMS_TO_TICKS(50));
 	got += aio_capture_stream(s_amic + got, 1600, 400, &cur);
 	uint32_t rw_end = aio_ref_now();
 	esp_task_wdt_reset();
-	printf("VL,AEC,ALIGN,post,got=%d,rw=%lu\r\n", (int)got,
+	kf_log("VL,AEC,ALIGN,post,got=%d,rw=%lu\r\n", (int)got,
 	       (unsigned long)rw_end);
-	fflush(stdout);
 
 	if (got < total / 2) {
 		kf_ev("aec", "align cap %d", (int)got);
@@ -146,9 +144,8 @@ static int32_t corr_align(void)
 					  (uint32_t)pos64, 4);
 
 	esp_task_wdt_reset();
-	printf("VL,AEC,ALIGN,refgot,n4=%d,pos=%lld\r\n", (int)got4,
+	kf_log("VL,AEC,ALIGN,refgot,n4=%d,pos=%lld\r\n", (int)got4,
 	       pos64);
-	fflush(stdout);
 	if (got4 < cn4) {
 		kf_ev("aec", "align refshort %d", (int)got4);
 		return -3;
@@ -183,9 +180,8 @@ static int32_t corr_align(void)
 			best_d = d;
 		}
 		esp_task_wdt_reset();
-		printf("VL,AEC,ALIGN,cand,d=%d,c=%lld,ms=%lld\r\n", d,
+		kf_log("VL,AEC,ALIGN,cand,d=%d,c=%lld,ms=%lld\r\n", d,
 		       c, (esp_timer_get_time() - t0) / 1000);
-		fflush(stdout);
 		vTaskDelay(1);	/* 让出：保 IDLE0/渲染节拍 */
 		}
 		/* 细扫：粗扫步长 32（2ms）峰判定漂移实测 ±28ms——AEC
@@ -227,8 +223,7 @@ void aec_align_probe(void)
 	int32_t offs[3];
 	int n = 0;
 
-	printf("VL,AEC,ALIGN,begin,corr\r\n");
-	fflush(stdout);
+	kf_log("VL,AEC,ALIGN,begin,corr\r\n");
 	/* 订阅 TWDT：再卡死则 7s 后吐任务名单与寄存器现场（HP WDT 静默
 	 * 锁死的取证 substitute）——V-46b 调试利器 */
 	esp_task_wdt_add(NULL);
@@ -241,8 +236,7 @@ void aec_align_probe(void)
 	}
 	for (int i = 0; i < 3; i++) {
 		offs[i] = corr_align();
-		printf("VL,AEC,ALIGN,rep=%d,offset=%d\r\n", i, (int)offs[i]);
-		fflush(stdout);
+		kf_log("VL,AEC,ALIGN,rep=%d,offset=%d\r\n", i, (int)offs[i]);
 		kf_ev("aec", "align rep=%d off=%d", i, (int)offs[i]);
 		if (offs[i] > 0)
 			n++;
@@ -265,11 +259,10 @@ void aec_align_probe(void)
 			med = c;
 		s_offset = med;
 		kf_ev("aec", "align offset=%d", (int)med);
-		printf("VL,AEC,ALIGN,result,offset=%d\r\n", (int)med);
+		kf_log("VL,AEC,ALIGN,result,offset=%d\r\n", (int)med);
 	} else {
-		printf("VL,AEC,ALIGN,result,FAIL,no_peak\r\n");
+		kf_log("VL,AEC,ALIGN,result,FAIL,no_peak\r\n");
 	}
-	fflush(stdout);
 }
 
 /* ---- b-3：MR+AFE 测量探针 ---- */
@@ -361,11 +354,9 @@ void aec_probe_run(void)
 	uint32_t q0 = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 	TaskHandle_t tf = NULL, td = NULL;
 
-	printf("VL,AEC,PROBE,begin,offset=%d\r\n", (int)s_offset);
-	fflush(stdout);
+	kf_log("VL,AEC,PROBE,begin,offset=%d\r\n", (int)s_offset);
 	if (s_offset < 0) {
-		printf("VL,AEC,PROBE,abort,run-R-first\r\n");
-		fflush(stdout);
+		kf_log("VL,AEC,PROBE,abort,run-R-first\r\n");
 		return;
 	}
 	models = esp_srmodel_init("model");	/* 一次性探针：模型表不回收 */
@@ -380,14 +371,12 @@ void aec_probe_run(void)
 	p_afe = esp_afe_handle_from_config(cfg);
 	p_data = p_afe ? p_afe->create_from_config(cfg) : NULL;
 	if (!p_data) {
-		printf("VL,AEC,PROBE,abort,afe_create\r\n");
-		fflush(stdout);
+		kf_log("VL,AEC,PROBE,abort,afe_create\r\n");
 		return;
 	}
 	p_chunk = p_afe->get_feed_chunksize(p_data);
-	printf("VL,AEC,PROBE,afe_ok,chunk=%d,ch=%d\r\n", p_chunk,
+	kf_log("VL,AEC,PROBE,afe_ok,chunk=%d,ch=%d\r\n", p_chunk,
 	       p_afe->get_feed_channel_num(p_data));
-	fflush(stdout);
 
 	p_running = true;
 	p_playing = false;
@@ -428,7 +417,7 @@ void aec_probe_run(void)
 	float feed_ms = p_feed_n ?
 			(double)p_feed_us / p_feed_n / 1000.0 : 0;
 
-	printf("VL,AEC,RESULT,raw_rms=%.0f,aec_rms=%.0f,suppression_db=%.1f,"
+	kf_log("VL,AEC,RESULT,raw_rms=%.0f,aec_rms=%.0f,suppression_db=%.1f,"
 	       "int=-%uKB,ps=-%uKB,feed_ms=%.1f\r\n",
 	       raw, aec, sup,
 	       (unsigned)((i0 - heap_caps_get_free_size(
@@ -436,7 +425,6 @@ void aec_probe_run(void)
 	       (unsigned)((q0 - heap_caps_get_free_size(
 				  MALLOC_CAP_SPIRAM)) >> 10),
 	       feed_ms);
-	fflush(stdout);
 	kf_ev("aec", "sup=%.1fdb raw=%.0f", sup, raw);
 
 	p_afe->destroy(p_data);	/* iface 有 destroy op：实例与内部任务回收 */

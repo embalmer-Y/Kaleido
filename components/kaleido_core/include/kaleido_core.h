@@ -20,8 +20,18 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* 框架初始化（app_main 最先调用；幂等） */
+/* 框架初始化（app_main 最先调用；幂等）。启动日志通道（单写者任务
+ * 独占 stdout + IDF 组件日志重定向）——多任务直呼 printf 的 stdout
+ * 锁死锁族根治（缺陷 B，门禁追记#7） */
 void kf_init(void);
+
+/* 统一日志（printf 同签名；行入队由 logger 任务独占打印并 flush）。
+ * 超长行（>159B）走堆回落；行池耗尽丢弃并计数。任何任务可调 */
+void kf_log(const char *fmt, ...)
+	__attribute__((format(printf, 1, 2)));
+
+/* 大块文本（如 'u' 运行时统计表）：堆拷贝入队（无行长限制） */
+void kf_log_raw(const char *text);
 
 /* 调试模式开关（串口 'v'）；打开时全局日志级别→DEBUG 且 KF 流上屏 */
 bool kf_dbg_get(void);

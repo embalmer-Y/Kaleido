@@ -26,6 +26,7 @@
 #include "kaleido_express.h"
 #include "kaleido_secret.h"
 #include "stage_express.h"
+#include "kaleido_core.h"
 
 static const char *TAG = "kex-bridge";
 
@@ -121,9 +122,8 @@ static void bridge_timer_cb(lv_timer_t *t)
 static void on_kex_state(void *user, enum kex_state st)
 {
 	(void)user;
-	printf("VL,KEX,%s,n=%d\r\n", kex_state_name(st),
+	kf_log("VL,KEX,%s,n=%d\r\n", kex_state_name(st),
 	       kex_transition_count());
-	fflush(stdout);
 	emote_stage_set_state(st);
 }
 

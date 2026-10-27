@@ -347,3 +347,25 @@ detect——AFE 环空警告的另一半根源）。多任务直呼 printf/fflus
 免疫门禁须在缺陷 B 修复后重测。
 
 **当前板上固件**：M+静音窗（回退稳定态）+ 打断管线全量 + 内存新布局。
+
+## 追记 #7 终章：缺陷 B 修复 + DashScope 证书轮换根因 + 全链复活
+
+**缺陷 B（stdout 锁死锁）修复**：KF 统一日志通道上线——单写者
+logger 任务独占 stdout（全系统唯一 printf/fflush 点），业务全量
+printf→kf_log（行池 32×160B 内部 RAM + 超长堆回落 + 满丢计数），
+`esp_log_set_vprintf` 把 ESP_LOGx 一并重定向。串口撕行消失，跨任务
+日志争用根除。
+
+**ASR 连锁失败的真根因：DashScope 证书轮换**（非固件回归）：
+*.aliyuncs.com 于 2026-10-13 起换用 GlobalSign GCC R46 OV TLS CA 2025
+→ Root R46 新链（openssl 取证），板内 IDF bundle 缺 R46 根 → verify
+失败 → -0x3000 级联（内存/栈的连串实验皆为此症状所误导）。
+**修复**：ASR TLS 显式锚定 R46 根（`cert_pem`，组件内嵌 gs_r46.pem）
+——固定服务端 CA 亦为最优产品实践；bundle 回退默认 FULL（MiniMax 依
+赖其查找）。绕行时的教训：bundle v2 只存 subject+公钥（不存整证），
+DER 子串搜索检验法无效。
+
+**复验（全绿）**：soak 连续 rc=0（asr_len 21~51、早切 0/14/2070/2512ms
+正常）；'n' 注入链路 ✓；'l' 环回 38.4dB PASS（PSRAM 迁移无回归）；
+KF 心跳/堆巡检在岗。**遗留**：AEC 驻留（缺陷 A）修后可撤静音窗启用
+声学打断；真语音唤醒/打断待负责人目验。

@@ -233,8 +233,7 @@ static void pa_polarity_probe(void)
 
 	gpio_config(&g);
 	if (!capbuf || !tone) {
-		printf("VL,P,FAIL,oom\r\n");
-		fflush(stdout);
+		kf_log("VL,P,FAIL,oom\r\n");
 		goto out;
 	}
 	for (int lvl = 1; lvl >= 0; lvl--) {
@@ -252,18 +251,16 @@ static void pa_polarity_probe(void)
 		uint32_t cur_p = 0;	/* 探针私有游标（单次会话） */
 
 		if (aio_capture_stream(capbuf, 16000, 3000, &cur_p) != 16000) {
-			printf("VL,P,lvl=%d,capture_fail\r\n", lvl);
-			fflush(stdout);
+			kf_log("VL,P,lvl=%d,capture_fail\r\n", lvl);
 			continue;
 		}
 		bin = goertzel(capbuf, 16000, 1000.0f, 16000.0f);
 		bin_lo = goertzel(capbuf, 16000, 940.0f, 16000.0f);
-		printf("VL,P,pa_lvl=%d,rms=%d,g1000=%.0f,g940=%.0f,"
+		kf_log("VL,P,pa_lvl=%d,rms=%d,g1000=%.0f,g940=%.0f,"
 		       "tone=%s\r\n",
 		       lvl, rms_i16(capbuf, 16000), (double)bin,
 		       (double)bin_lo,
 		       (bin > bin_lo * 4.0f) ? "YES" : "no");
-		fflush(stdout);
 		vTaskDelay(pdMS_TO_TICKS(200));
 	}
 	gpio_set_level(53, 1); /* 恢复驱动默认极性 */
@@ -293,8 +290,7 @@ static void sd_test(void)
 	slot.cd = SDMMC_SLOT_NO_CD; /* 先不卡检测，直挂 */
 	slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 	if (!buf || !rb) {
-		printf("VL,S,FAIL,oom\r\n");
-		fflush(stdout);
+		kf_log("VL,S,FAIL,oom\r\n");
 		goto out;
 	}
 	/* 重试矩阵：首验 4bit@20M 在 SSR 读取超时（卡对速率/位宽敏感）；
@@ -308,16 +304,14 @@ static void sd_test(void)
 	for (int i = 0; i < 3 && err != ESP_OK; i++) {
 		slot.width = try_width[i];
 		host.max_freq_khz = try_khz[i];
-		printf("VL,S,TRY,width=%d,khz=%d\r\n", try_width[i],
+		kf_log("VL,S,TRY,width=%d,khz=%d\r\n", try_width[i],
 		       try_khz[i]);
-		fflush(stdout);
 		err = esp_vfs_fat_sdmmc_mount("/sd", &host, &slot, &mc,
 					      &card);
 	}
 
 	if (err != ESP_OK) {
-		printf("VL,S,FAIL,mount=%d\r\n", err);
-		fflush(stdout);
+		kf_log("VL,S,FAIL,mount=%d\r\n", err);
 		/* 不 unmount：失败态下清理会波及 slot1(C5)，复位恢复 */
 		goto out;
 	}
@@ -329,15 +323,13 @@ static void sd_test(void)
 	FILE *f = fopen("/sd/kaleido_sdtest.bin", "wb");
 
 	if (!f) {
-		printf("VL,S,FAIL,open_w\r\n");
-		fflush(stdout);
+		kf_log("VL,S,FAIL,open_w\r\n");
 		goto unmount;
 	}
 	t0 = esp_timer_get_time();
 	for (int i = 0; i < 4; i++) { /* 4×256KB = 1MB */
 		if (fwrite(buf, 1, 256 * 1024, f) != 256 * 1024) {
-			printf("VL,S,FAIL,write\r\n");
-			fflush(stdout);
+			kf_log("VL,S,FAIL,write\r\n");
 			fclose(f);
 			goto unmount;
 		}
@@ -347,16 +339,14 @@ static void sd_test(void)
 
 	f = fopen("/sd/kaleido_sdtest.bin", "rb");
 	if (!f) {
-		printf("VL,S,FAIL,open_r\r\n");
-		fflush(stdout);
+		kf_log("VL,S,FAIL,open_r\r\n");
 		goto unmount;
 	}
 	t0 = esp_timer_get_time();
 	for (int i = 0; i < 4; i++) {
 		if (fread(rb, 1, 256 * 1024, f) != 256 * 1024 ||
 		    memcmp(buf, rb, 256 * 1024) != 0) {
-			printf("VL,S,FAIL,read_verify\r\n");
-			fflush(stdout);
+			kf_log("VL,S,FAIL,read_verify\r\n");
 			fclose(f);
 			goto unmount;
 		}
@@ -364,9 +354,8 @@ static void sd_test(void)
 	fclose(f);
 	int64_t t_r = esp_timer_get_time() - t0;
 
-	printf("VL,S,RESULT,write=%.2fMB/s,read=%.2fMB/s,verify=OK\r\n",
+	kf_log("VL,S,RESULT,write=%.2fMB/s,read=%.2fMB/s,verify=OK\r\n",
 	       4.0 / ((double)t_w / 1e6), 4.0 / ((double)t_r / 1e6));
-	fflush(stdout);
 	remove("/sd/kaleido_sdtest.bin");
 unmount:
 	esp_vfs_fat_sdcard_unmount("/sd", card);
@@ -383,8 +372,7 @@ static void loopback_tone(void)
 	int16_t *tone = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
 
 	if (!silence || !capbuf || !tone) {
-		printf("VL,L,FAIL,oom\r\n");
-		fflush(stdout);
+		kf_log("VL,L,FAIL,oom\r\n");
 		goto out;
 	}
 	for (size_t i = 0; i < 16000; i++)
@@ -396,8 +384,7 @@ static void loopback_tone(void)
 	int n_noise = aio_capture_stream(silence, 16000, 2000, &cur_l);
 
 	if (n_noise != 16000) {
-		printf("VL,L,FAIL,capture_noise=%d\r\n", n_noise);
-		fflush(stdout);
+		kf_log("VL,L,FAIL,capture_noise=%d\r\n", n_noise);
 		goto out;
 	}
 	int rms_noise = rms_i16(silence, 16000);
@@ -407,8 +394,7 @@ static void loopback_tone(void)
 	int n_sig = aio_capture_stream(capbuf, 16000, 3000, &cur_l);
 
 	if (n_sig != 16000) {
-		printf("VL,L,FAIL,capture_sig=%d\r\n", n_sig);
-		fflush(stdout);
+		kf_log("VL,L,FAIL,capture_sig=%d\r\n", n_sig);
 		goto out;
 	}
 	int rms_sig = rms_i16(capbuf, 16000);
@@ -418,13 +404,12 @@ static void loopback_tone(void)
 	float snr = 20.0f *
 	    log10f(((float)rms_sig + 1.0f) / ((float)rms_noise + 1.0f));
 
-	printf("VL,L,RESULT,noise_rms=%d,sig_rms=%d,snr_db=%.1f,"
+	kf_log("VL,L,RESULT,noise_rms=%d,sig_rms=%d,snr_db=%.1f,"
 	       "g1000=%.0f,g940=%.0f,g1060=%.0f,verdict=%s\r\n",
 	       rms_noise, rms_sig, (double)snr, (double)bin,
 	       (double)bin_lo, (double)bin_hi,
 	       (bin > bin_lo * 2.5f &&
 		bin > bin_hi * 2.5f) ? "PASS" : "FAIL");
-	fflush(stdout);
 out:
 	heap_caps_free(silence);
 	heap_caps_free(capbuf);
@@ -463,8 +448,7 @@ static void tts_listen_task(void *arg)
 
 		if (n <= 0)
 			break;
-		printf("VL,A,TTS_RMS,%d\r\n", rms_i16(win, n));
-		fflush(stdout);
+		kf_log("VL,A,TTS_RMS,%d\r\n", rms_i16(win, n));
 	}
 	heap_caps_free(win);
 	vTaskDelete(NULL);
@@ -489,13 +473,11 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	int rc;
 
 	if (!cap) {
-		printf("VL,A,FAIL,oom\r\n");
-		fflush(stdout);
+		kf_log("VL,A,FAIL,oom\r\n");
 		return;
 	}
-	printf("VL,A,ROUND,speaker plays prompt %us, mic listens\r\n",
+	kf_log("VL,A,ROUND,speaker plays prompt %us, mic listens\r\n",
 	       (unsigned)(total / 16000));
-	fflush(stdout);
 
 	/* ① 静默底噪（1s）——缓冲运行期 PSRAM（见 pa_polarity_probe 注） */
 	int16_t *noise = heap_caps_malloc(16000 * 2, MALLOC_CAP_SPIRAM);
@@ -530,18 +512,16 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	t_capture_end = esp_timer_get_time();
 	rms_play = got ? rms_i16(cap, got) : 0;
 
-	printf("VL,A,ACOUSTIC,noise_rms=%d,played_rms=%d,got=%u/%u,"
+	kf_log("VL,A,ACOUSTIC,noise_rms=%d,played_rms=%d,got=%u/%u,"
 	       "air_snr_db=%.1f\r\n",
 	       rms_noise, rms_play, (unsigned)got, (unsigned)total,
 	       (double)(20.0f * log10f(((float)rms_play + 1.0f) /
 				       ((float)rms_noise + 1.0f))));
-	fflush(stdout);
 
 	/* ③ 采回的音频送 ASR（喇叭→空气→麦→云端 的语音级证明） */
 	if (ks_asr_open(asr, &(struct ks_asr_events){
 			.on_text = on_asr_text }) != 0) {
-		printf("VL,A,FAIL,asr_open\r\n");
-		fflush(stdout);
+		kf_log("VL,A,FAIL,asr_open\r\n");
 		goto out;
 	}
 	for (size_t off = 0; off < got; off += CAP_CHUNK) {
@@ -554,16 +534,14 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		/* 快喂（采音频已完整，无需 1x 节奏） */
 	}
 	if (ks_asr_finish(15000) != 0) {
-		printf("VL,A,FAIL,asr_finish\r\n");
-		fflush(stdout);
+		kf_log("VL,A,FAIL,asr_finish\r\n");
 		ks_asr_close();
 		goto out;
 	}
 	t_asr_final = esp_timer_get_time();
 	ks_asr_close();
-	printf("VL,A,ASR_ECHO,%s\r\n",
+	kf_log("VL,A,ASR_ECHO,%s\r\n",
 	       s_asr_text[0] ? s_asr_text : "(empty)");
-	fflush(stdout);
 	if (!s_asr_text[0])
 		goto out;
 
@@ -580,12 +558,11 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		ESP_LOGW(TAG, "pump not done in 30s");
 	pump_tts_detach();
 	if (rc != 0) {
-		printf("VL,A,FAIL,llm=%d\r\n", rc);
-		fflush(stdout);
+		kf_log("VL,A,FAIL,llm=%d\r\n", rc);
 		goto out;
 	}
 	vTaskDelay(pdMS_TO_TICKS(500));
-	printf("VL,A,RESULT,asr_final=%lld,llm_first=%lld,"
+	kf_log("VL,A,RESULT,asr_final=%lld,llm_first=%lld,"
 	       "tts_first_pcm=%lld,first_audio=%lld,"
 	       "capture_to_audio=%lld\r\n",
 	       (t_asr_final - t_capture_end) / 1000,
@@ -593,7 +570,6 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	       t_tts_first_pcm ? (t_tts_first_pcm - t_capture_end) / 1000 : -1,
 	       t_first_audio ? (t_first_audio - t_capture_end) / 1000 : -1,
 	       t_first_audio ? (t_first_audio - t_capture_end) / 1000 : -1);
-	fflush(stdout);
 out:
 	free(cap);
 }
@@ -637,8 +613,7 @@ static void dualtls_probe_task(void *arg)
 
 	(void)arg;
 	if (voice_heapmon_start() != 0) {
-		printf("VL,PROBE,DUALTLS,mon=fail\r\n");
-		fflush(stdout);
+		kf_log("VL,PROBE,DUALTLS,mon=fail\r\n");
 		vTaskDelete(NULL);
 		return;
 	}
@@ -647,9 +622,8 @@ static void dualtls_probe_task(void *arg)
 		vTaskDelay(pdMS_TO_TICKS(1000));
 		if (ks_asr_open(s_probe.asr, &(struct ks_asr_events){
 				.on_text = on_asr_text }) != 0) {
-			printf("VL,PROBE,DUALTLS,asr_open=fail,int_min=%dkb\r\n",
+			kf_log("VL,PROBE,DUALTLS,asr_open=fail,int_min=%dkb\r\n",
 			       voice_heapmon_stop());
-			fflush(stdout);
 			vTaskDelete(NULL);
 			return;
 		}
@@ -658,14 +632,12 @@ static void dualtls_probe_task(void *arg)
 	if (xTaskCreatePinnedToCore(probe_llm_task, "p_llm", 16384, NULL,
 				    5, NULL, 0) != pdPASS) {
 		ks_asr_close();
-		printf("VL,PROBE,DUALTLS,llm_task=fail,int_min=%dkb\r\n",
+		kf_log("VL,PROBE,DUALTLS,llm_task=fail,int_min=%dkb\r\n",
 		       voice_heapmon_stop());
-		fflush(stdout);
 		vTaskDelete(NULL);
 		return;
 	}
-	printf("VL,PROBE,phase=asr-opened,llm=started\r\n");
-	fflush(stdout);
+	kf_log("VL,PROBE,phase=asr-opened,llm=started\r\n");
 	/* 喂 6s 内置 PCM（1x 节奏），保证与 LLM TLS 窗口重叠 */
 	while (fed < total && esp_timer_get_time() - t0 < 6000000) {
 		size_t n = CAP_CHUNK;
@@ -686,16 +658,14 @@ static void dualtls_probe_task(void *arg)
 			vTaskDelay(pdMS_TO_TICKS(50));
 		}
 	}
-	printf("VL,PROBE,phase=fed=%u,llm_done=%d\r\n",
+	kf_log("VL,PROBE,phase=fed=%u,llm_done=%d\r\n",
 	       (unsigned)fed, s_probe.llm_done);
-	fflush(stdout);
 	asr_rc = ks_asr_finish(3000);
 	ks_asr_close();
-	printf("VL,PROBE,DUALTLS,int_min=%dkb,asr_finish=%d,llm_rc=%d,"
+	kf_log("VL,PROBE,DUALTLS,int_min=%dkb,asr_finish=%d,llm_rc=%d,"
 	       "overlap_ms=%lld\r\n",
 	       voice_heapmon_stop(), asr_rc, s_probe.llm_rc,
 	       (esp_timer_get_time() - t0) / 1000);
-	fflush(stdout);
 	vTaskDelete(NULL);
 }
 
@@ -905,11 +875,10 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	t_capture_end = t_asr_final = 0;
 	t_llm_first = t_tts_first_pcm = t_first_audio = 0;
 
-	printf("VL,ROUND,%d,speak now %ds\r\n", s_round, CAP_SECONDS);
-	printf("VL,HEAP,int=%uk,psram=%uk\r\n",
+	kf_log("VL,ROUND,%d,speak now %ds\r\n", s_round, CAP_SECONDS);
+	kf_log("VL,HEAP,int=%uk,psram=%uk\r\n",
 	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
 	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
-	fflush(stdout);
 
 	if (ks_asr_open(asr, &(struct ks_asr_events){
 			.on_text = on_asr_text }) != 0) {
@@ -953,8 +922,7 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 					sinf(2.0f * (float)M_PI * 1000.0f *
 					     (float)i / 16000.0f));
 
-		printf("VL,LIVE,beep=speak now %ds\r\n", CAP_SECONDS);
-		fflush(stdout);
+		kf_log("VL,LIVE,beep=speak now %ds\r\n", CAP_SECONDS);
 		if (cue)
 			aio_play(cue, 3200, 1000);
 		static uint32_t cur_g;	/* 'g' 轮私有游标（跨轮连续） */
@@ -982,8 +950,7 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	}
 	t_asr_final = esp_timer_get_time();
 	ks_asr_close();
-	printf("VL,ASR,%s\r\n", s_asr_text[0] ? s_asr_text : "(empty)");
-	fflush(stdout);
+	kf_log("VL,ASR,%s\r\n", s_asr_text[0] ? s_asr_text : "(empty)");
 	if (!s_asr_text[0]) {
 		rc = -3;
 		goto out;
@@ -1005,7 +972,7 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 
 	/* 等播放队列清空（尾部余量） */
 	vTaskDelay(pdMS_TO_TICKS(500));
-	printf("VL,RESULT,round=%d,fed_ms=%u,asr_final=%lld,"
+	kf_log("VL,RESULT,round=%d,fed_ms=%u,asr_final=%lld,"
 	       "llm_first=%lld,clause=%lld,tts_first_pcm=%lld,"
 	       "first_audio=%lld,"
 	       "total_trigger_to_audio=%lld,total_capture_to_audio=%lld\r\n",
@@ -1021,7 +988,6 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	       t_first_audio ? (t_first_audio - t_trigger) / 1000 : -1,
 	       t_first_audio ? (t_first_audio -
 				t_capture_end) / 1000 : -1);
-	fflush(stdout);
 out:
 	/* 早退路径泵可能尚未收口（预热会话还开着）：flush 哨兵再关 */
 	if (!pump_stop(15000))
@@ -1100,12 +1066,11 @@ static void creds_resolve(void)
 			  sizeof(s_ds_key));
 	ksec_get_fallback(KSEC_KEY_MM, CONFIG_KS_MM_KEY, s_mm_key_buf,
 			  sizeof(s_mm_key_buf));
-	printf("VL,OOBE,nvs_mask=0x%x,wifi=%s,asr=%s,llm=%s\r\n",
+	kf_log("VL,OOBE,nvs_mask=0x%x,wifi=%s,asr=%s,llm=%s\r\n",
 	       ksec_state(),
 	       s_wifi_ssid[0] ? "y" : "n",
 	       s_ds_key[0] ? "y" : "n",
 	       s_mm_key_buf[0] ? "y" : "n");
-	fflush(stdout);
 }
 
 void app_main(void)
@@ -1152,10 +1117,9 @@ void app_main(void)
 
 	kf_ev("boot", "mem int=%uk", (unsigned)(heap_caps_get_free_size(
 				      MALLOC_CAP_INTERNAL) / 1024));
-	printf("VL,MEM,boot,int=%uk,ps=%uk\r\n",
+	kf_log("VL,MEM,boot,int=%uk,ps=%uk\r\n",
 	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
 	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
-	fflush(stdout);
 	if (aio_init() != 0) {
 		ESP_LOGE(TAG, "aio fail");
 		return;
@@ -1185,12 +1149,11 @@ void app_main(void)
 	 * 背光使能，见其注释） */
 	bsp_lcd_backlight_set(1);
 
-	printf("VL,MEM,pre-wifi,int=%uk,ps=%uk\r\n",
+	kf_log("VL,MEM,pre-wifi,int=%uk,ps=%uk\r\n",
 	       (unsigned)(heap_caps_get_free_size(
 			  MALLOC_CAP_INTERNAL) / 1024),
 	       (unsigned)(heap_caps_get_free_size(
 			  MALLOC_CAP_SPIRAM) / 1024));
-	fflush(stdout);
 
 	if (oobe_ap) {
 		if (provision_ap_start() != 0) {
@@ -1210,10 +1173,10 @@ void app_main(void)
 		llm.model = "MiniMax-M3";
 		llm.no_think = true;
 		s_use_minimax = true;
-		printf("VL,LLM,MINIMAX,ok\r\n");
+		kf_log("VL,LLM,MINIMAX,ok\r\n");
 	} else {
 		llm.api_key = CONFIG_VL_LLM_KEY;
-		printf("VL,LLM,MINIMAX,fallback_dashscope\r\n");
+		kf_log("VL,LLM,MINIMAX,fallback_dashscope\r\n");
 	}
 
 	/* 未配齐云端 key：Web 配置页常驻本局域网（负责人指示：浏览器粘贴） */
@@ -1244,11 +1207,10 @@ void app_main(void)
 	 * 听，打断与自唤醒免疫均由 AEC 链承担 */
 	wakenet_start(&tts, false, convo_notify_wake);
 
-	printf("VL,READY,keys: g=round t=embedded a=acoustic w=wakenet "
+	kf_log("VL,READY,keys: g=round t=embedded a=acoustic w=wakenet "
 	       "W=wn-selftest c=hands-free n=manual-wake C=auto-soak "
 	       "M=llm-toggle k=web-config o=ap-probe u=stats s=sd p=pa "
 	       "l=loopback e=emote-cycle R=align Y=aec (%d menu rounds) [voice-always-on V-46c]\r\n", ROUND_MAX);
-	fflush(stdout);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
 		bool round_key = (ch == 'g' || ch == 'G' || ch == 't' ||
@@ -1274,8 +1236,7 @@ void app_main(void)
 		if (ch == 'Y') {
 			/* V-46b：AEC 抑制测量 + 成本审计 */
 			if (s_busy || wakenet_selftest_busy()) {
-				printf("VL,BUSY\r\n");
-				fflush(stdout);
+				kf_log("VL,BUSY\r\n");
 				continue;
 			}
 			s_busy = true;
@@ -1293,8 +1254,7 @@ void app_main(void)
 		 * （ks_tts_open 会清 s_mm 单例），并发即互相拆台 */
 		if ((round_key || ch == 'a' || ch == 'A' || ch == 'W') &&
 		    (s_busy || wakenet_selftest_busy() || convo_active())) {
-			printf("VL,BUSY\r\n");
-			fflush(stdout);
+			kf_log("VL,BUSY\r\n");
 			continue;
 		}
 		if (ch == 'a' || ch == 'A') {
@@ -1318,34 +1278,29 @@ void app_main(void)
 				llm.no_think = true;
 				s_use_minimax = true;
 			}
-			printf("VL,LLM,PROVIDER,%s\r\n",
+			kf_log("VL,LLM,PROVIDER,%s\r\n",
 			       s_use_minimax ? "minimax" : "dashscope");
-			fflush(stdout);
 			continue;
 		}
 		if (ch == 'k' || ch == 'K') {
 			/* Web 配置页（浏览器粘贴长密钥；负责人指示的主通道） */
 			if (provision_server_start() != 0)
-				printf("VL,OOBE,WEB,fail\r\n");
-			fflush(stdout);
+				kf_log("VL,OOBE,WEB,fail\r\n");
 			continue;
 		}
 		if (ch == 'o' || ch == 'O') {
 			/* V-42a 运行时探针：强制切 SoftAP 热点态（esp_hosted
 			 * AP 走 C5 RPC，bring-up 是否成功必须上板看）。
 			 * 复位即恢复 STA */
-			printf("VL,OOBE,AP,switching\r\n");
-			fflush(stdout);
+			kf_log("VL,OOBE,AP,switching\r\n");
 			esp_wifi_stop();
 			if (provision_ap_start() != 0)
-				printf("VL,OOBE,AP,fail\r\n");
-			fflush(stdout);
+				kf_log("VL,OOBE,AP,fail\r\n");
 			continue;
 		}
 		if (ch == 'c' || ch == 'C') {
 			if (s_busy || wakenet_selftest_busy()) {
-				printf("VL,BUSY\r\n");
-				fflush(stdout);
+				kf_log("VL,BUSY\r\n");
 				continue;
 			}
 			if (ch == 'C') {
@@ -1353,39 +1308,34 @@ void app_main(void)
 				 * N 轮无人值守（V-43 门禁判据） */
 				wakenet_start(&tts, false, convo_notify_wake);
 				convo_start(&asr, &tts, &llm);
-				printf("VL,CONVO,SOAK,START,n=10\r\n");
-				fflush(stdout);
+				kf_log("VL,CONVO,SOAK,START,n=10\r\n");
 				convo_soak_start(10);
 				continue;
 			}
 			if (!convo_active()) {
 				wakenet_start(&tts, false, convo_notify_wake);
 				if (!convo_start(&asr, &tts, &llm)) {
-					printf("VL,CONVO,START,fail\r\n");
-					fflush(stdout);
+					kf_log("VL,CONVO,START,fail\r\n");
 					continue;
 				}
-				printf("VL,CONVO,ON,say=ni-hao-xiao-zhi\r\n");
+				kf_log("VL,CONVO,ON,say=ni-hao-xiao-zhi\r\n");
 			} else {
 				convo_stop();
-				printf("VL,CONVO,OFF\r\n");
+				kf_log("VL,CONVO,OFF\r\n");
 			}
-			fflush(stdout);
 			continue;
 		}
 		if (ch == 'E') {
 			/* V-44a 双 TLS 并发探针 */
 			if (s_busy || wakenet_selftest_busy() ||
 			    convo_active()) {
-				printf("VL,BUSY\r\n");
-				fflush(stdout);
+				kf_log("VL,BUSY\r\n");
 				continue;
 			}
 			s_probe.asr = &asr;
 			s_probe.llm = &llm;
 			llm.user_msg = "现在几点了？请简短回答。";
-			printf("VL,PROBE,DUALTLS,start\r\n");
-			fflush(stdout);
+			kf_log("VL,PROBE,DUALTLS,start\r\n");
 			xTaskCreatePinnedToCore(dualtls_probe_task, "p_asr",
 						16384, NULL, 5, NULL, 0);
 			continue;
@@ -1403,8 +1353,7 @@ void app_main(void)
 				bsp_lcd_backlight_set(!s_disp_off);
 				lvgl_port_unlock();
 			}
-			printf("VL,DISP,%s\r\n", s_disp_off ? "off" : "on");
-			fflush(stdout);
+			kf_log("VL,DISP,%s\r\n", s_disp_off ? "off" : "on");
 			continue;
 		}
 		if (ch == 'n' || ch == 'N') {
@@ -1414,14 +1363,13 @@ void app_main(void)
 			if (convo_state_get() == CONVO_SPEAKING) {
 				pb_abort_playback();
 				convo_notify_wake();
-				printf("VL,CONVO,BARGE,manual\r\n");
+				kf_log("VL,CONVO,BARGE,manual\r\n");
 			} else if (convo_active()) {
 				convo_notify_wake();
-				printf("VL,CONVO,WAKE,manual\r\n");
+				kf_log("VL,CONVO,WAKE,manual\r\n");
 			} else {
-				printf("VL,CONVO,OFF,press-c-first\r\n");
+				kf_log("VL,CONVO,OFF,press-c-first\r\n");
 			}
-			fflush(stdout);
 			continue;
 		}
 		if (ch == 'w') {
@@ -1437,8 +1385,7 @@ void app_main(void)
 			if (!stats)
 				continue;
 			vTaskGetRunTimeStats(stats);
-			printf("%s\r\n", stats);
-			fflush(stdout);
+			kf_log_raw(stats);
 			kf_health_dump();	/* KF：心跳+事件环尾 */
 			continue;
 		}
@@ -1454,10 +1401,8 @@ void app_main(void)
 		s_round++;
 		one_round(&asr, &tts, &llm, embedded);
 		s_busy = false;
-		printf("VL,READY,press 'g'+Enter (%d/%d used)\r\n",
+		kf_log("VL,READY,press 'g'+Enter (%d/%d used)\r\n",
 		       s_round, ROUND_MAX);
-		fflush(stdout);
 	}
-	printf("VL,DONE\r\n");
-	fflush(stdout);
+	kf_log("VL,DONE\r\n");
 }

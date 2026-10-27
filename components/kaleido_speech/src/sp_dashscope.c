@@ -18,6 +18,9 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
+
+/* GlobalSign Root R46（DashScope 2026-10 起的链锚，公开根证书） */
+extern const char gs_r46_pem_start[] asm("_binary_gs_r46_pem_start");
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -233,7 +236,12 @@ int ks_asr_open(const struct ks_asr_cfg *cfg,
 	esp_websocket_client_config_t wc = {
 		.buffer_size = KS_WS_BUF,
 		.network_timeout_ms = 10000,
-		.crt_bundle_attach = esp_crt_bundle_attach,
+		/* V-46c：crt_bundle 查找对 DashScope 新链（GlobalSign R46，
+		 * 2026-10-13 轮换）失败——改显式锚定其真实 CA 根（同为
+		 * 最优产品实践：固定服务端 CA）。若仍失败则与信任无关，
+		 * 转向分配/栈问题 */
+		.cert_pem = gs_r46_pem_start,
+		.task_stack = 8192,
 	};
 
 	if (!cfg || !cfg->url || !cfg->api_key || !cfg->model)
@@ -495,7 +503,12 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 	esp_websocket_client_config_t wc = {
 		.buffer_size = KS_WS_BUF,
 		.network_timeout_ms = 10000,
-		.crt_bundle_attach = esp_crt_bundle_attach,
+		/* V-46c：crt_bundle 查找对 DashScope 新链（GlobalSign R46，
+		 * 2026-10-13 轮换）失败——改显式锚定其真实 CA 根（同为
+		 * 最优产品实践：固定服务端 CA）。若仍失败则与信任无关，
+		 * 转向分配/栈问题 */
+		.cert_pem = gs_r46_pem_start,
+		.task_stack = 8192,
 	};
 
 	/* voice 缺失会被 run_task_build 当成 ASR 帧（task:function 走

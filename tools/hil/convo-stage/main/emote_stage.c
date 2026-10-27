@@ -107,8 +107,7 @@ static void emote_task(void *arg)
 				    ESP_ERR_NOT_FOUND)
 					emote_gen_player_anim_fade_name(
 						s_player, "smile_05s", true);
-				printf("VL,EMOTE,CLIP,%s\r\n", kex_clip[i].clip);
-				fflush(stdout);
+				kf_log("VL,EMOTE,CLIP,%s\r\n", kex_clip[i].clip);
 				kf_ev("emote", "clip=%s", kex_clip[i].clip);
 				resize_after_switch();
 				break;
@@ -126,9 +125,8 @@ static void emote_task(void *arg)
 			const emote_gen_player_index_entry_t *e =
 				emote_gen_player_get_index_entry(s_player, idx);
 
-			printf("VL,EMOTE,CLIP,%s\r\n",
+			kf_log("VL,EMOTE,CLIP,%s\r\n",
 			       e ? e->name : "?");
-			fflush(stdout);
 			resize_after_switch();
 			break;
 		}
@@ -183,8 +181,7 @@ static void resize_after_switch(void)
 	if (tip)
 		gfx_obj_set_visible(tip, false);
 	gfx_emote_unlock(gh);
-	printf("VL,EMOTE,RESIZED,%dx%d\r\n", STAGE_W, STAGE_H);
-	fflush(stdout);
+	kf_log("VL,EMOTE,RESIZED,%dx%d\r\n", STAGE_W, STAGE_H);
 }
 
 /* ---- gfx 回调（渲染任务上下文） ---- */
@@ -241,8 +238,7 @@ static void stat_timer_cb(lv_timer_t *t)
 
 	s_frame_cnt = 0;
 	(void)t;
-	printf("DSI,EMOTE,FPS,%u\r\n", (unsigned)(frames * 2 / 3));
-	fflush(stdout);
+	kf_log("DSI,EMOTE,FPS,%u\r\n", (unsigned)(frames * 2 / 3));
 	if (kf_dbg_get() && lcd_panel) {
 		void *fbs[2] = { 0 };
 		static uint16_t *fb0, *fb1;
@@ -254,7 +250,7 @@ static void stat_timer_cb(lv_timer_t *t)
 			fb1 = fbs[1];
 		}
 		if (fb0)
-			printf("DSI,EMOTE,FB,y300=%04X/%04X,y600=%04X/%04X"
+			kf_log("DSI,EMOTE,FB,y300=%04X/%04X,y600=%04X/%04X"
 			       "\r\n",
 			       fb0[300 * 800 + 440], fb1[300 * 800 + 440],
 			       fb0[600 * 800 + 440], fb1[600 * 800 + 440]);
@@ -263,8 +259,7 @@ static void stat_timer_cb(lv_timer_t *t)
 	if (++s_patrol % 20 == 0) {
 		bool ok = heap_caps_check_integrity_all(true);
 
-		printf("VL,HEAP,%s\r\n", ok ? "OK" : "CORRUPT");
-		fflush(stdout);
+		kf_log("VL,HEAP,%s\r\n", ok ? "OK" : "CORRUPT");
 	}
 	kf_beat("emote");
 }
@@ -380,8 +375,7 @@ int emote_stage_start(void)
 	}
 	size_t n = emote_gen_player_get_index_count(s_player);
 
-	printf("VL,EMOTE,MOUNTED,clips=%d\r\n", (int)n);
-	fflush(stdout);
+	kf_log("VL,EMOTE,MOUNTED,clips=%d\r\n", (int)n);
 	kf_ev("emote", "mounted clips=%d", (int)n);
 	/* 首播走队列（此刻 app_main 持 LVGL 锁，emote 任务里切播+拉正
 	 * 才符合锁序；kex idle 回调稍后也会入队，幂等） */

@@ -25,6 +25,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "kaleido_core.h"
 
 #include "kaleido_secret.h"
 #include "provision.h"
@@ -337,8 +338,7 @@ int provision_server_start(void)
 	httpd_register_uri_handler(s_httpd, &uri);
 
 	oobe_ip(ip, sizeof(ip));
-	printf("VL,OOBE,WEB,http://%s/\r\n", ip[0] ? ip : "?");
-	fflush(stdout);
+	kf_log("VL,OOBE,WEB,http://%s/\r\n", ip[0] ? ip : "?");
 	return 0;
 }
 
@@ -368,8 +368,7 @@ int provision_ap_start(void)
 	ESP_ERROR_CHECK(esp_wifi_start());
 
 	/* DHCP 由 esp_netif AP 默认置 192.168.4.1/24 */
-	printf("VL,OOBE,AP,ssid=%s,open,url=http://192.168.4.1/\r\n",
+	kf_log("VL,OOBE,AP,ssid=%s,open,url=http://192.168.4.1/\r\n",
 	       OOBE_AP_SSID);
-	fflush(stdout);
 	return provision_server_start();
 }
