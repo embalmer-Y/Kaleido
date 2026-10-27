@@ -38,6 +38,8 @@
 #include "core/gfx_obj.h"
 #include "widget/gfx_anim.h"
 
+#include "kaleido_core.h"
+
 #include "emote_stage.h"
 
 extern esp_lcd_panel_handle_t lcd_panel;
@@ -57,6 +59,7 @@ static SemaphoreHandle_t s_pause_ack;
 
 /* update_cb 缓存的动画对象（每帧事件刷新；resize 专用） */
 static const void *volatile s_anim_obj;
+static volatile uint32_t s_frame_cnt;	/* fps 仪表：update_cb 帧计数 */
 
 /* ---- KEX 五态 → 猫伴片段（index.json 实名，含尾下划线） ---- */
 static const struct {
@@ -106,6 +109,7 @@ static void emote_task(void *arg)
 						s_player, "smile_05s", true);
 				printf("VL,EMOTE,CLIP,%s\r\n", kex_clip[i].clip);
 				fflush(stdout);
+				kf_ev("emote", "clip=%s", kex_clip[i].clip);
 				resize_after_switch();
 				break;
 			}
@@ -202,7 +206,12 @@ static void stage_flush_cb(int x1, int y1, int x2, int y2, const void *data,
 		for (int y = y1; y < y2; y++)
 			memcpy(&s_canvas_buf[y * STAGE_W + x1],
 			       &src[(y - y1) * w], w * sizeof(uint16_t));
-		lv_obj_invalidate(s_img);
+		/* 只脏本分片：整画布 invalidate 曾令 LVGL 每刷新周期
+		 * 全量重绘 325²（~20 倍超量，卡顿根因之一） */
+		lv_area_t dirty = { .x1 = x1, .y1 = y1,
+				    .x2 = x2 - 1, .y2 = y2 - 1 };
+
+		lv_obj_invalidate_area(s_img, &dirty);
 		lvgl_port_unlock();
 	}
 	emote_gen_player_notify_flush_finished(mgr);
@@ -217,18 +226,24 @@ static void stage_update_cb(gfx_disp_event_t event, const void *obj,
 	 * 自旋闭环，把整机 CPU 饿死（V-46a 实测教训）。拉正时机=
 	 * 切换动作后一次性执行（见 emote_task） */
 	if (obj && (event == GFX_DISP_EVENT_ONE_FRAME_DONE ||
-		    event == GFX_DISP_EVENT_ALL_FRAME_DONE))
+		    event == GFX_DISP_EVENT_ALL_FRAME_DONE)) {
 		s_anim_obj = obj;
+		s_frame_cnt++;
+	}
 }
 
-/* ---- 心跳：STAT + FB 采样 + 堆巡检（V-45 取证仪表自 lottie_stage 移植） ---- */
+/* ---- 心跳：FPS + FB 采样（debug 态） + 堆巡检 ---- */
 
 static void stat_timer_cb(lv_timer_t *t)
 {
 	static int s_patrol;
+	uint32_t frames = s_frame_cnt;
 
+	s_frame_cnt = 0;
 	(void)t;
-	if (lcd_panel) {
+	printf("DSI,EMOTE,FPS,%u\r\n", (unsigned)(frames * 2 / 3));
+	fflush(stdout);
+	if (kf_dbg_get() && lcd_panel) {
 		void *fbs[2] = { 0 };
 		static uint16_t *fb0, *fb1;
 
@@ -251,6 +266,7 @@ static void stat_timer_cb(lv_timer_t *t)
 		printf("VL,HEAP,%s\r\n", ok ? "OK" : "CORRUPT");
 		fflush(stdout);
 	}
+	kf_beat("emote");
 }
 
 /* ---- 对外 API ---- */
@@ -329,7 +345,10 @@ int emote_stage_start(void)
 			   .buff_dma = false, .buff_spiram = true },
 		.gfx_emote = { .h_res = STAGE_W, .v_res = STAGE_H,
 			       .fps = STAGE_FPS },
-		.buffers = { .buf_pixels = STAGE_W * 16 },
+		/* 109 行/分片：gfx 每帧按 buf_pixels 切分片、每片阻塞等
+		 * 我方 flush——16 行/片=20 次锁往返+20 次 invalidate/帧
+		 * （实测卡顿主因）；3 片/帧后 LVGL 重绘次数同步降一个量级 */
+		.buffers = { .buf_pixels = STAGE_W * 109 },
 		.task = { .task_priority = 5, .task_stack = 6 * 1024,
 			  .task_affinity = -1, .task_stack_in_ext = false },
 		.flush_cb = stage_flush_cb,
@@ -356,6 +375,7 @@ int emote_stage_start(void)
 
 	printf("VL,EMOTE,MOUNTED,clips=%d\r\n", (int)n);
 	fflush(stdout);
+	kf_ev("emote", "mounted clips=%d", (int)n);
 	/* 首播走队列（此刻 app_main 持 LVGL 锁，emote 任务里切播+拉正
 	 * 才符合锁序；kex idle 回调稍后也会入队，幂等） */
 	emote_stage_set_state(KEX_IDLE);

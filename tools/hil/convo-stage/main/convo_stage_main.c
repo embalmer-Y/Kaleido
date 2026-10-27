@@ -55,6 +55,7 @@
 #include "sdkconfig.h"
 #include "sdmmc_cmd.h"
 #include "emote_stage.h"
+#include "kaleido_core.h"
 #include "stage_express.h"
 
 #define CAP_SECONDS	30 /* 负责人要求：真人轮 30s 窗防错过（'t' 内置轮不受影响）*/
@@ -1083,11 +1084,10 @@ void app_main(void)
 		.cut_clauses = true, /* M1.5：子句级切送，首音不等句号 */
 	};
 
+	kf_init();		/* 框架最先：崩溃取证回放在任何业务日志前 */
 	esp_log_level_set("*", ESP_LOG_WARN);
-	/* ASR WS 取证（V-45 遗留：asr open fail 无组件层日志） */
-	esp_log_level_set("websocket_client", ESP_LOG_INFO);
-	esp_log_level_set("transport_base", ESP_LOG_INFO);
-	esp_log_level_set("transport_ssl", ESP_LOG_INFO);
+	/* ws 组件日志收权（V-45 取证用临时 INFO 已常态化进 debug 模式，
+	 * 'v' 打开时全局 DEBUG 覆盖） */
 	nvs_flash_init();
 	esp_netif_init();
 	esp_event_loop_create_default();
@@ -1100,6 +1100,8 @@ void app_main(void)
 	 * 有则连网，密钥缺口可随时经 'k'（浏览器）或串口后备补 */
 	bool oobe_ap = !s_wifi_ssid[0] || !s_wifi_pass[0];
 
+	kf_ev("boot", "mem int=%uk", (unsigned)(heap_caps_get_free_size(
+				      MALLOC_CAP_INTERNAL) / 1024));
 	printf("VL,MEM,boot,int=%uk,ps=%uk\r\n",
 	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
 	       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
@@ -1356,6 +1358,7 @@ void app_main(void)
 			vTaskGetRunTimeStats(stats);
 			printf("%s\r\n", stats);
 			fflush(stdout);
+			kf_health_dump();	/* KF：心跳+事件环尾 */
 			continue;
 		}
 		if (ch == 'W') {

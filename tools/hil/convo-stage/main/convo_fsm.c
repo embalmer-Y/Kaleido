@@ -28,6 +28,7 @@
 
 #include "audio_io.h"
 #include "clause_pump.h"
+#include "kaleido_core.h"
 #include "convo_fsm.h"
 
 /* voice_loop_main 的播放通路（单一写者原则下的跨模块挂点） */
@@ -282,6 +283,7 @@ static void convo_task(void *arg)
 			       (unsigned)(heap_caps_get_free_size(
 					  MALLOC_CAP_SPIRAM) / 1024));
 			fflush(stdout);
+	kf_ev("convo", "round rc=%d ms=%lld", rc, el / 1000);
 		}
 		s_state = CONVO_IDLE;
 	}

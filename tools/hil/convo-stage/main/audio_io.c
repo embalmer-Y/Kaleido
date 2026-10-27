@@ -20,6 +20,8 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+
+#include "kaleido_core.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
@@ -98,6 +100,7 @@ static void cap_task(void *arg)
 			s_ring[(s_w + i) & AIO_RING_MASK] = st[2 * i];
 		s_w += frames;
 		portEXIT_CRITICAL(&s_ring_mux);
+		kf_beat("aio_cap");
 	}
 }
 

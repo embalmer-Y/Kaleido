@@ -17,5 +17,5 @@ idf_component_register(SRCS "convo_stage_main.c" "stage_express.c" "emote_stage.
                                      esp_lvgl_port lvgl
                                      esp_lcd_jd9366 esp_lcd_touch_jd9366
                                      kaleido_speech kaleido_secret kaleido_express
-                                     fatfs sdmmc espressif__esp-sr
+                                     fatfs sdmmc espressif__esp-sr kaleido_core
                                      espressif2022__esp_emote_gen_player)

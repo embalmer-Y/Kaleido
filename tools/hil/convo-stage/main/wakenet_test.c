@@ -22,6 +22,7 @@
 #include "audio_io.h"
 #include "convo_fsm.h"
 #include "esp_lvgl_port.h"
+#include "kaleido_core.h"
 #include "kaleido_speech.h"
 #include "emote_stage.h"
 
@@ -174,6 +175,7 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	if (!emote_stage_pause(true)) {
 		/* 隔离降级不许静默：记日志后中止本次加载（渲染未停就跑
 		 * 模型加载=重蹈 V-45 缓存维护死锁——宁可让用户重按） */
+		kf_ev("wn", "pause_timeout");
 		printf("VL,WN,ERROR=emote_pause_timeout\r\n");
 		fflush(stdout);
 		s_running = false;
@@ -224,6 +226,8 @@ out_unfreeze:
 	emote_stage_pause(false);
 	if (!models || models->num == 0 || !s_afe || !s_afe_data)
 		return;
+	kf_ev("wn", "loaded int=-%uKB", (unsigned)(
+		      (i0 - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) >> 10));
 	printf("VL,WN,INIT,ok,model=%s,int=-%uKB,ps=-%uKB\r\n",
 	       models->model_name[0] ? models->model_name[0] : "?",
 	       (unsigned)((i0 - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) >> 10),

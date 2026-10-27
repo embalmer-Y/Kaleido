@@ -242,3 +242,37 @@ I2S 通道重配并发死锁，开机冻结）。新架构下 'C' 浸泡 7/7 rc=
 
 **V-45 状态**：四态 soak 判据达成（11/11 + 7/7），收口仅余用户目验
 （猫伴五态/动画质量）。V-46b/c（AEC 参考环/打断）地基已就位。
+
+---
+
+## 追记 #5（2026-10-27 夜）：动画卡顿根因修复 + KF 应用框架 + crash 取证包
+
+**负责人反馈**：动画时常卡顿（最差 4-5fps）；crash 类问题 debug 成本过高；
+要求框架化+模块化+专用调试模式+全 flow 日志。
+
+**卡顿根因（gfx_render 源码级）**：esp_emote_gfx 每帧把脏区切成
+`buf_pixels/width` 行分片，**每片 flush 后阻塞等消费者确认**——配置
+325×16=16 行/片 → 每帧 20 次「flush_cb→LVGL 锁→整画布 invalidate→
+LVGL 全量重绘 325²→等 DPI vsync→notify」往返。双重放大：
+①20 次锁往返/帧；②整画布 invalidate 使 LVGL 每刷新周期重绘整块
+canvas（~20 倍超量）。gfx 与 LVGL 两渲染任务乒乓，帧预算全耗在重复劳动。
+
+**修复**：分片 109 行（3 次/帧）+ 脏区 invalidate（只重绘本分片）。
+**板上实测：FPS 20-25 稳定（空载与 wakenet/浸泡负载同），无卡顿特征**
+（FPS 仪表 `DSI,EMOTE,FPS,n` 常驻）。
+
+**KF 应用框架（components/kaleido_core，设计说明见其头文件）**：
+- 事件环形日志 `kf_ev()`（192 条内部 RAM 环）：关键 flow 全接入
+  （boot/emote/wakenet/convo/aio）；panic/WDT 复位后开机自动回放
+  `VL,CRASH,last=...` + 死前 24 条——已在板上实战（本次 boot 抓获
+  上个生命周期的 other_wdt，即追记#3 的首启 rst:0x7 观察项）。
+- 调试模式 'v' 一键切换：关=发布口径（WARN 级、FB 采样等仪表关闭、
+  串口安静）；开=全局 DEBUG+KF 流+诊断仪表。
+- 任务心跳 `kf_beat()` + 'u' 健康转储（heap/心跳年龄/事件尾）——
+  卡死类先看"谁没跳"。
+- coredump 落 flash（新分区 coredump@0x910000 64KB，storage 缩至
+  960KB）；解码命令入 tools/hil/convo-stage/README.md。
+
+**遗留观察**：esptool 下载复位后首启偶发极早期 rst:0x7（app_main 之前，
+事件环为空无法定位；KF 在岗，若带事件复发即回放）。模块化后续：
+audio/convo 随 V-46c AEC 重构时再升组件（避免无谓 churn）。
