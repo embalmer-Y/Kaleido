@@ -311,3 +311,39 @@ frame_pointer）把三次"静默锁死"变成三次精准定位——
 **V-46b 判据**：10.5dB < 15dB 目标——**带差距结案**：链路/对齐/排布/
 成本全部定界清楚，差距根因（非线性失真）明确且 V-46c 有对策（打断
 阈值按感知调、播放期音量策略）。V-46c 集成基线参数全齐。
+
+---
+
+## 追记 #7（2026-10-27 深夜）：V-46c 机制落地 + 两个深层缺陷定界（AEC 驻留挂起）
+
+**V-46c 机制面（已落地并保留）**：
+- 语音前端驻留 boot（'MR'/'M' 配置一处翻转），撤静音窗实验完成
+- 真打断管线全通：`aio_tx_abort`（100ms 块粒切写）+ `pb_abort_playback`
+  （排干）+ 唤醒路由（SPEAKING→BARGE 即听不鸣笛/LISTENING 忽略防重
+  触发）+ 'n' 键 SPEAKING 态=打断机制测试入口
+- **内存布局系统优化（负责人指令）**：`kf_task_psram` 生成器入框架；
+  convo(16K)/wn_say(10K)/asr_close/emote/tlisten 栈迁 PSRAM；gfx 渲染
+  栈走组件 `task_stack_in_ext`；beep/cue/stats/s_body/VAD 暂存/轮暂存/
+  play&cap 暂存全部 PSRAM 懒分配。**boot 241k→285k、pre-wifi 186k→248k
+  （+62KB）**。内部保留清单（DMA/驱动/取证强约束）：I2S/DPI DMA 描述
+  符、esp-aes 对齐缓冲、hosted 内部、KF 事件环（14.6KB，硬锁取证需在
+  PSRAM 失效场景下存活）
+- 教训：`xTaskCreateStaticPinnedToCore` 不接受 core=-1（configASSERT
+  →bootloop），负核号须走 `xTaskCreateStatic`（kf_task_psram 已内化）
+
+**缺陷 A：esp-sr AEC3 FFT 无限循环（AEC 驻留挂起）**——"MR"+AEC 在
+首遇真实参考数据后 wn_feed 热旋，TWDT 回溯钉 `dl_rfft_post_proc`（定
+长循环变异=句柄数值失控，预编译库）。对照实验：PSRAM/内部分配同挂、
+convo PSRAM 栈排除、'W' 无真实参考不挂。0.5dB→10.5dB 的排布结论不受
+影响（探针短窗可用）；**驻留长跑挂起**。证据包齐（三组 TWDT 回溯），
+向上游 esp-sr 提报候选。
+
+**缺陷 B：picolibc stdout 锁死锁族（新定位，P0）**——soak 期 main 卡
+`fflush→stdout 递归锁→xQueueTakeMutexRecursive` 永久等待（回溯完整）；
+持锁任务异常后锁永不释放 → **所有任务的日志调用连环卡死**（含 feed/
+detect——AFE 环空警告的另一半根源）。多任务直呼 printf/fflush 的架构
+债，KF 统一日志通道（单写者+锁）是既定解法，下轮专攻。**此缺陷亦使
+'W' hits=0/10 的"AEC 免疫"判读存疑**（管道堵塞同样致 0 命中）——
+免疫门禁须在缺陷 B 修复后重测。
+
+**当前板上固件**：M+静音窗（回退稳定态）+ 打断管线全量 + 内存新布局。

@@ -12,6 +12,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "portmacro.h"
 
 #define KF_EV_N		192	/* 事件环容量（76B/条 ≈14.6KB 内部） */
@@ -116,8 +117,10 @@ void kf_health_dump(void)
 	kf_ev("kf", "health_dump");
 	heap_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 	heap_ps = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-	printf("VL,KF,HEAP,int=%u,ps=%u\r\n",
-	       (unsigned)(heap_int >> 10), (unsigned)(heap_ps >> 10));
+	printf("VL,KF,HEAP,int=%u,ps=%u,intmax=%u\r\n",
+	       (unsigned)(heap_int >> 10), (unsigned)(heap_ps >> 10),
+	       (unsigned)(heap_caps_get_largest_free_block(
+				  MALLOC_CAP_INTERNAL) >> 10));
 
 	portENTER_CRITICAL(&s_mux);
 	uint32_t t = now_ms();
@@ -176,4 +179,33 @@ void kf_boot_forensics(void)
 			idx = 0;
 	}
 	fflush(stdout);
+}
+
+bool kf_task_psram(const char *name, size_t stack_bytes,
+		   void (*fn)(void *), void *arg, int prio, int core,
+		   void **stk_slot, void *tcb_slot)
+{
+	if (!stk_slot || !tcb_slot)
+		return false;
+	if (!*stk_slot)
+		*stk_slot = heap_caps_malloc(stack_bytes,
+					     MALLOC_CAP_SPIRAM);
+	if (!*stk_slot)
+		return false;
+	TaskHandle_t th;
+
+	if (core < 0) {
+		/* 负核号=无亲和：*PinnedToCore 变体不接受 -1（会
+		 * configASSERT——V-46c bootloop 实证），走通用变体 */
+		th = xTaskCreateStatic(fn, name, stack_bytes, arg, prio,
+				       (StackType_t *)*stk_slot,
+				       (StaticTask_t *)tcb_slot);
+	} else {
+		th = xTaskCreateStaticPinnedToCore(fn, name, stack_bytes,
+						   arg, prio,
+						   (StackType_t *)*stk_slot,
+						   (StaticTask_t *)tcb_slot,
+						   core);
+	}
+	return th != NULL;
 }

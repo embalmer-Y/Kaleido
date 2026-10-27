@@ -118,11 +118,22 @@ static int rms_i16(const int16_t *p, size_t n)
 	return (int)sqrt((double)acc / (n ? n : 1));
 }
 
+/* PSRAM 栈槽（V-46c 内存布局：懒分配一次，任务常驻不回收） */
+static StackType_t *s_convo_stk;
+static StaticTask_t s_convo_tcb;
+static StackType_t *s_close_stk;
+static StaticTask_t s_close_tcb;
+
 /* LISTENING 采音：边采边喂 ASR；VAD-lite（前 300ms 估底噪，说话后
  * 连续静音 VAD_SILENCE_MS 即收口）。返回喂入样本数 */
 static size_t listen_capture(int64_t *speech_ms_out)
 {
-	static int16_t chunk[VAD_CHUNK];
+	static int16_t *chunk;	/* VAD 暂存 3.2KB：PSRAM 懒分配（V-46c） */
+
+	if (!chunk)
+		chunk = heap_caps_malloc(VAD_CHUNK * 2, MALLOC_CAP_SPIRAM);
+	if (!chunk)
+		return 0;
 	static uint32_t vad_cur;	/* V-46a：私有采音游标（跨轮连续，
 					 * 首读掉队自跳最新） */
 	int64_t t0 = esp_timer_get_time();
@@ -231,8 +242,8 @@ static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 		ks_asr_close();
 		return -3;	/* 空 ASR：安静地回 IDLE */
 	}
-	xTaskCreatePinnedToCore(asr_closer_task, "asr_close", 4096, NULL,
-				5, NULL, 0);
+	kf_task_psram("asr_close", 4096, asr_closer_task, NULL, 5, 0,
+		      (void **)&s_close_stk, &s_close_tcb);
 
 	if (pump_tts_attach(s_tts, on_tts_pcm) != 0)
 		return -5;

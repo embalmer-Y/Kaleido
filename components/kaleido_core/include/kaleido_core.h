@@ -41,4 +41,12 @@ void kf_health_dump(void);
  * 在 kf_init 内自动调用，无需手动 */
 void kf_boot_forensics(void);
 
+/* V-46c 内存布局：PSRAM 栈任务生成器。栈从 PSRAM 懒分配一次（*stk_slot
+ * 持有，常驻不回收——任务栈生命周期=进程生命周期），TCB 由调用方给静态
+ * 槽。适用：网络/UI/辅助任务；实时音频路径（I2S 喂取）建议留内部栈。
+ * 返回 false=分配或创建失败（*stk_slot 已置 NULL 可重试） */
+bool kf_task_psram(const char *name, size_t stack_bytes,
+		   void (*fn)(void *), void *arg, int prio, int core,
+		   void **stk_slot, void *tcb_slot);
+
 #endif /* KALEIDO_CORE_H */

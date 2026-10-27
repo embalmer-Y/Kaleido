@@ -1,9 +1,13 @@
 /*
  * wakenet_test.c — WakeNet 单麦唤醒（M2 前置，esp-sr 2.6.0）
  *
- * 'w'：监听模式——AFE 双任务常驻，唤醒即双短鸣 + 日志
- * 'W'：TTS 回环自验——喇叭每 7s 说一次"你好小智"（wn9_nihaoxiaozhi_tts
- *      模型对 TTS 合成语音鲁棒），统计命中数与检测延迟
+ * V-46c 定形：语音前端常驻——"MR"+AEC 双通道 AFE（V-46b 基线参数：
+ * 连续排布/对齐 offset/默认档），撤 V-43 播放期静音窗口，自唤醒免疫
+ * 改由 AEC 结构性承担。唤醒路由：IDLE/OFF=常规唤醒（双短鸣）；SPEAKING=
+ * 真打断（清播放+转听，≤1s 门禁）；LISTENING 中命中忽略（防重触发）。
+ * 'w'：确认常驻（已驻留则幂等）
+ * 'W'：TTS 回环自验——语义随 AEC 反转：设备自说的唤醒词被 AEC 抑制，
+ *      hits=自唤醒泄漏率（越低越好，门禁 ≤1/10）
  */
 #include <math.h>
 #include <stdio.h>
@@ -26,6 +30,11 @@
 #include "kaleido_speech.h"
 #include "emote_stage.h"
 
+/* convo_stage_main：V-46c 打断——播放缓冲排干 + TX 中止 */
+void pb_abort_playback(void);
+/* V-46b 对齐 offset（'R' 实测；未测返回负 → feed 用 DMA 深度兜底） */
+int32_t aec_align_offset(void);
+
 /* voice_loop_main.c 的 TTS PCM → 扬声器缓冲（s_pb）转发 */
 extern void on_tts_pcm(void *user, const uint8_t *pcm, size_t len);
 void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
@@ -38,7 +47,10 @@ static volatile bool s_selftest;	/* 'W' 自检进行中（主菜单互斥门用�
 static void (*s_on_wake)(void);		/* FSM 挂点：唤醒即通知（可 NULL） */
 static volatile int s_wake_cnt;
 static volatile int64_t s_speak_us;	/* TTS 开口时刻（延迟基准） */
-static int16_t s_beep[4800];		/* 300ms 提示音 */
+static StackType_t *s_say_stk;		/* wn_say PSRAM 栈槽 */
+static StaticTask_t s_say_tcb;
+static int16_t *s_beep;			/* 300ms 提示音（9.6KB，PSRAM 懒分配
+					 * ——V-46c 内部水位线） */
 
 static void beep_play_task(void *arg)
 {
@@ -64,19 +76,15 @@ static void feed_task(void *arg)
 	}
 	printf("VL,WN,FEED,chunk=%d\r\n", chunk);
 	fflush(stdout);
-	/* 核 0 喂音 / 核 1 检测（创建处绑核）：与 LVGL/网络任务天然错峰 */
+	/* 核 0 喂音 / 核 1 检测（创建处绑核）。静音窗口恢复（V-46c
+	 * 回退）：AEC 驻留被 esp-sr AEC3 FFT 病理阻断（追记#7），
+	 * 自唤醒免疫暂由静音窗承担；AEC 修复后撤窗换打断监听 */
 	for (;;) {
-		/* FSM 占麦让渡（V-43）：免按键会话非 IDLE 态不喂麦——轮
-		 * 采集独占麦克风；AEC 落地（V-46）前，自唤醒免疫即由此
-		 * 结构性获得（播放期根本无人听麦）。OFF=FSM 未启，独立
-		 * 'w' 模式照常监听 */
 		while (convo_state_get() != CONVO_OFF &&
 		       convo_state_get() != CONVO_IDLE)
 			vTaskDelay(pdMS_TO_TICKS(50));
 		int n = aio_capture_stream(buf, chunk, 2000, &feed_cur);
 
-		/* 采不足一帧补静音：AFE 按固定节拍消费，断流会拖垮
-		 * 内部缓冲对齐（宁可喂静音也不饿它） */
 		if (n < chunk)
 			memset(buf + n, 0, (chunk - n) * sizeof(int16_t));
 		s_afe->feed(s_afe_data, buf);
@@ -89,19 +97,35 @@ static void detect_task(void *arg)
 	for (;;) {
 		afe_fetch_result_t *r = s_afe->fetch(s_afe_data);
 
-		if (r && r->wakeup_state == WAKENET_DETECTED) {
-			int64_t lat = s_speak_us ?
-				(esp_timer_get_time() - s_speak_us) / 1000 : -1;
+		if (!r || r->wakeup_state != WAKENET_DETECTED)
+			continue;
+		int64_t lat = s_speak_us ?
+			(esp_timer_get_time() - s_speak_us) / 1000 : -1;
+		enum convo_state st = convo_state_get();
 
-			s_wake_cnt++;
-			printf("VL,WN,WAKE,cnt=%d,lat_ms=%lld,vol=%.1f\r\n",
-			       s_wake_cnt, lat, r->data_volume);
+		s_wake_cnt++;
+		if (st == CONVO_SPEAKING) {
+			/* V-46c 真打断：播放中止（aio_tx_abort 100ms 块粒
+			 * 切写 + pb 排干）+ 唤醒事件（轮收尾回 IDLE 后
+			 * 即开 LISTENING）。≤1s 停播转听门禁 */
+			pb_abort_playback();
+			printf("VL,WN,BARGE,cnt=%d,vol=%.1f\r\n",
+			       s_wake_cnt, r->data_volume);
 			fflush(stdout);
+			kf_ev("wn", "barge-in");
 			if (s_on_wake)
-				s_on_wake();	/* 通知 FSM（免按键轮起点） */
-			xTaskCreatePinnedToCore(beep_play_task, "beep", 4096,
-						NULL, 6, NULL, 0);
+				s_on_wake();
+			continue;	/* 打断即听，不鸣笛抢话 */
 		}
+		if (st == CONVO_LISTENING || st == CONVO_THINKING)
+			continue;	/* 会话进行中命中：防重触发 */
+		printf("VL,WN,WAKE,cnt=%d,lat_ms=%lld,vol=%.1f\r\n",
+		       s_wake_cnt, lat, r->data_volume);
+		fflush(stdout);
+		if (s_on_wake)
+			s_on_wake();	/* 通知 FSM（免按键轮起点） */
+		xTaskCreatePinnedToCore(beep_play_task, "beep", 4096,
+					NULL, 6, NULL, 0);
 	}
 }
 
@@ -132,7 +156,9 @@ static void announce_task(void *arg)
 		vTaskDelay(pdMS_TO_TICKS(7000));
 	}
 	vTaskDelay(pdMS_TO_TICKS(1500));	/* 等尾音抵达检测 */
-	printf("VL,WN,SELFTEST,done,hits=%d/%d\r\n",
+	/* hits 语义（V-46c 反转）：设备自说的唤醒词应被 AEC 抑制，
+	 * hits=自唤醒泄漏率，越低越好（门禁 ≤1/10） */
+	printf("VL,WN,SELFTEST,done,hits=%d/%d,leak=lower-better\r\n",
 	       s_wake_cnt - hits0, cycles);
 	fflush(stdout);
 	s_selftest = false;
@@ -153,12 +179,21 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 
 	/* 二次进入会重复 esp_srmodel_init（泄模型表）+ 二次 create AFE
 	 * （数百 KB）并覆盖 s_afe/s_afe_data——旧 feed/detect 任务仍在
-	 * 按新指针跑，双重喂入 + OOM。当前无停止路径（任务常驻到复位），
-	 * 属 M2 状态机工作，这里只保证不重复起 */
+	 * 按新指针跑，双重喂入 + OOM。V-46c 常驻后 'w'/'c' 均走此分支 */
 	if (s_running) {
-		/* 已在跑：仅补挂 FSM 回调（'c' 先于 'w' 的启动顺序容忍） */
+		/* 已在跑：补挂 FSM 回调；'W' 允许原地起自验（不重建 AFE） */
 		if (on_wake)
 			s_on_wake = on_wake;
+		if (selftest && !s_selftest) {
+			s_selftest = true;
+			s_speak_us = 0;
+			kf_task_psram("wn_say", 10240, announce_task, tts,
+				      4, 0, (void **)&s_say_stk,
+				      &s_say_tcb);
+			printf("VL,WN,LISTENING,selftest\r\n");
+			fflush(stdout);
+			return;
+		}
 		printf("VL,WN,ALREADY_RUNNING\r\n");
 		fflush(stdout);
 		return;
@@ -194,10 +229,14 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 		fflush(stdout);
 		goto out_unfreeze;
 	}
+	/* AEC 驻留挂起（V-46c）：esp-sr 预编译 AEC3 在真实参考数据下
+	 * FFT 无限循环（wn_feed 热旋、TWDT 回溯钉 dl_rfft；PSRAM/内部
+	 * 分配两态对照同挂，convo 栈排除）——证据包入门禁追记#7，
+	 * 待上游修复或下轮专攻。暂回 "M" 无 AEC + 静音窗（已证稳定），
+	 * 打断管线保留（pb/TX 中止+路由），AEC 修复即配置翻转 */
 	afe_config_t *cfg = afe_config_init("M", models, AFE_TYPE_SR,
 					    AFE_MODE_HIGH_PERF);
 
-	/* P4 内部 RAM 紧张，AFE 尽量放 PSRAM；单麦无 AEC（TX 参考后续接） */
 	cfg->aec_init = false;
 	cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 	cfg = afe_config_check(cfg);
@@ -234,7 +273,14 @@ out_unfreeze:
 	       (unsigned)((p0 - heap_caps_get_free_size(MALLOC_CAP_SPIRAM)) >> 10));
 	fflush(stdout);
 
-	for (size_t i = 0; i < sizeof(s_beep) / sizeof(s_beep[0]); i++)
+	if (!s_beep)
+		s_beep = heap_caps_malloc(sizeof(int16_t) * 4800,
+					  MALLOC_CAP_SPIRAM);
+	if (!s_beep) {
+		printf("VL,WN,ERROR=beep_alloc\r\n");
+		fflush(stdout);
+	} else
+	for (size_t i = 0; i < 4800; i++)
 		s_beep[i] = (int16_t)(6000.0f *
 				sinf(2.0f * (float)M_PI * 880.0f * (float)i /
 				     16000.0f));

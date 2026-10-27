@@ -135,9 +135,18 @@ bool aio_ref_get(int16_t *out, size_t n, uint32_t pos)
 
 static void cap_task(void *arg)
 {
-	static int16_t st[AIO_CAP_CHUNK * 2]; /* 立体声中转（左=奇? 左=偶） */
+	/* 立体声中转（左声道）：i2s_channel_read 自带拷出 DMA 缓冲，
+	 * 目标可驻 PSRAM——懒分配（V-46c 内存布局） */
+	static int16_t *st;
 	static uint8_t s_zero_run;	/* 连续 0 读计数（退避遥测用） */
 	size_t frames;
+
+	if (!st)
+		st = heap_caps_malloc(AIO_CAP_CHUNK * 2 * 2,
+				      MALLOC_CAP_SPIRAM);
+	if (!st)
+		vTaskDelete(NULL);
+
 
 	(void)arg;
 	for (;;) {
@@ -344,18 +353,34 @@ int aio_capture_stream(int16_t *mono, size_t samples, uint32_t timeout_ms,
 	return want;
 }
 
+static volatile bool s_tx_abort;	/* V-46c 打断：切当前 I2S 写 */
+
+void aio_tx_abort(bool on)
+{
+	s_tx_abort = on;
+}
+
 int aio_play(const int16_t *mono, size_t samples, uint32_t timeout_ms)
 {
-	/* 双声道复制送出：codec 锁左锁右都能拿到数据 */
-	static int16_t st[3200];
+	/* 双声道复制送出：i2s_channel_write 自带拷入 DMA 缓冲，暂存源
+	 * 可驻 PSRAM——6.4KB 懒分配（V-46c 内存布局） */
+	static int16_t *st;
+
+	if (!st)
+		st = heap_caps_malloc(3200 * 2, MALLOC_CAP_SPIRAM);
+	if (!st)
+		return 0;
 	size_t done = 0;
 
 	if (!s_play_mux ||
 	    xSemaphoreTake(s_play_mux, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
 		return 0;
 	while (done < samples) {
-		size_t n = samples - done;
+		size_t n;
 
+		if (s_tx_abort)
+			break;	/* 打断：100ms 块粒度尽早退出 */
+		n = samples - done;
 		if (n > sizeof(st) / 4)
 			n = sizeof(st) / 4;
 		for (size_t i = 0; i < n; i++) {

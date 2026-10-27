@@ -28,6 +28,9 @@ int aio_capture_stream(int16_t *mono, size_t samples, uint32_t timeout_ms,
 /* 播放 mono 16k PCM（内部复制到双声道槽）；返回写入样本数 */
 int aio_play(const int16_t *mono, size_t samples, uint32_t timeout_ms);
 
+/* V-46c 打断：置位后 aio_play 在 100ms 块边界尽早返回 */
+void aio_tx_abort(bool on);
+
 /* V-46b AEC 参考：绝对样本位置（TX 已写入 DMA 的累计帧数）与读取。
  * 位置与 aio_capture_stream 游标同空间但不等相位——偏移实测（'R'） */
 uint32_t aio_ref_now(void);

@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -34,7 +35,15 @@ static const char *TAG = "oobe";
 #define OOBE_BODY_MAX	4096	/* 表单体上限：JWT 690B + 余量 */
 
 static httpd_handle_t s_httpd;
-static char s_body[OOBE_BODY_MAX];	/* httpd 默认单线程，共享安全 */
+static char *s_body;	/* httpd 默认单线程，共享安全；4KB PSRAM 懒分配
+				 * （V-46c 内存布局），首次请求时分配 */
+static bool s_body_get(void)
+{
+	if (!s_body)
+		s_body = heap_caps_malloc(OOBE_BODY_MAX,
+					  MALLOC_CAP_SPIRAM);
+	return s_body != NULL;
+}
 
 /* ---- 工具 ---- */
 
@@ -210,7 +219,12 @@ static esp_err_t h_save(httpd_req_t *req)
 	char field[800];	/* 单字段上限：JWT ~690B + 余量 */
 	int saved = 0;
 
-	if (total <= 0 || total >= (int)sizeof(s_body)) {
+	if (!s_body_get()) {
+		httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+				    "oom");
+		return ESP_FAIL;
+	}
+	if (total <= 0 || total >= OOBE_BODY_MAX) {
 		httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
 				    "body too large");
 		return ESP_FAIL;

@@ -333,8 +333,12 @@ int emote_stage_start(void)
 		ESP_LOGE(TAG, "DSI,EMOTE,ERROR=queue");
 		return -1;
 	}
-	/* emote 任务先起（后续 player 事件有归宿） */
-	if (xTaskCreate(emote_task, "emote", 4096, NULL, 4, NULL) != pdPASS) {
+	/* emote 任务先起（后续 player 事件有归宿）；队列驱动型，PSRAM 栈 */
+	static StackType_t *s_emote_stk;
+	static StaticTask_t s_emote_tcb;
+
+	if (!kf_task_psram("emote", 4096, emote_task, NULL, 4, -1,
+			   (void **)&s_emote_stk, &s_emote_tcb)) {
 		ESP_LOGE(TAG, "DSI,EMOTE,ERROR=task");
 		return -1;
 	}
@@ -350,7 +354,10 @@ int emote_stage_start(void)
 		 * （实测卡顿主因）；3 片/帧后 LVGL 重绘次数同步降一个量级 */
 		.buffers = { .buf_pixels = STAGE_W * 109 },
 		.task = { .task_priority = 5, .task_stack = 6 * 1024,
-			  .task_affinity = -1, .task_stack_in_ext = false },
+			  .task_affinity = -1,
+			  /* V-46c 内存布局：gfx 渲染栈进 PSRAM（组件原生
+			   * 选项），内部 RAM 留给 DMA/驱动 */
+			  .task_stack_in_ext = true },
 		.flush_cb = stage_flush_cb,
 		.update_cb = stage_update_cb,
 	};

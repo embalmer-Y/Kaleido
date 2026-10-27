@@ -107,6 +107,8 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 		   void (*on_wake)(void));
 bool wakenet_selftest_busy(void);
 
+static volatile bool s_pb_abort;	/* V-46c 打断：排干旗标 */
+
 /* convo_fsm 查询播放积压（轮隔离等待用）；单一写者 play_task */
 size_t pb_pending(void)
 {
@@ -115,19 +117,42 @@ size_t pb_pending(void)
 
 static void play_task(void *arg)
 {
-	static int16_t mono[1600]; /* 100ms 单块 */
+	/* 100ms 单块暂存：PSRAM 懒分配（i2s 写路径自身会拷入 DMA 缓冲，
+	 * 源可驻 PSRAM——V-46c 内存布局） */
+	static int16_t *mono;
+
+	if (!mono)
+		mono = heap_caps_malloc(1600 * 2, MALLOC_CAP_SPIRAM);
+	if (!mono)
+		vTaskDelete(NULL);
 
 	for (;;) {
-		size_t n = xStreamBufferReceive(s_pb, mono,
-						sizeof(mono),
-						pdMS_TO_TICKS(10000));
+		size_t n;
 
+		if (s_pb_abort) {
+			/* V-46c 打断：静默排干缓冲（aio_tx_abort 已切
+			 * 当前 I2S 写），清旗标后回到待命 */
+			while (xStreamBufferBytesAvailable(s_pb))
+				xStreamBufferReceive(s_pb, mono,
+						     sizeof(mono), 0);
+			s_pb_abort = false;
+			aio_tx_abort(false);
+			continue;
+		}
+		n = xStreamBufferReceive(s_pb, mono, sizeof(mono),
+					 pdMS_TO_TICKS(10000));
 		if (n == 0)
 			continue;
 		if (!t_first_audio)
 			t_first_audio = esp_timer_get_time();
 		aio_play(mono, n / 2, 1000);
 	}
+}
+
+void pb_abort_playback(void)
+{
+	s_pb_abort = true;
+	aio_tx_abort(true);
 }
 
 void on_tts_pcm(void *user, const uint8_t *pcm, size_t len)
@@ -421,6 +446,9 @@ static void prompt_play_task(void *arg)
  * 已死栈帧（评审 2026-10-26 BUG#6） */
 static int64_t s_listen_end;
 
+static StackType_t *s_tlisten_stk;
+static StaticTask_t s_tlisten_tcb;
+
 static void tts_listen_task(void *arg)
 {
 	/* 采音窗 32KB 运行期 PSRAM（原静态 .bss，V-45 内存清单整改） */
@@ -447,7 +475,13 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 {
 	size_t total = (test_prompt_end - test_prompt_start) / 2;
 	int16_t *cap = heap_caps_malloc(total * 2, MALLOC_CAP_SPIRAM);
-	static int16_t chunk[CAP_CHUNK];
+	static int16_t *chunk;	/* 6.4KB 暂存：PSRAM 懒分配（V-46c） */
+
+	if (!chunk)
+		chunk = heap_caps_malloc(CAP_CHUNK * 2,
+					 MALLOC_CAP_SPIRAM);
+	if (!chunk)
+		return;
 	int64_t ftok = 0;
 	int rms_noise = 0;
 	int rms_play = 0;
@@ -536,8 +570,8 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	/* ④ LLM → 子句泵 → TTS 外放；播放期同步采音 */
 	pump_tts_attach(tts, on_tts_pcm);
 	s_listen_end = esp_timer_get_time() + 15000000;
-	xTaskCreatePinnedToCore(tts_listen_task, "tlisten", 4096,
-				NULL, 4, NULL, 0);
+	kf_task_psram("tlisten", 4096, tts_listen_task, NULL, 4, 0,
+		      (void **)&s_tlisten_stk, &s_tlisten_tcb);
 	llm->user_msg = s_asr_text;
 	rc = ks_llm_chat(llm, pump_on_llm_sentence, NULL, &ftok);
 	t_llm_first = ftok;
@@ -768,8 +802,10 @@ static esp_err_t app_lvgl_init(void)
 {
 	lvgl_port_cfg_t lc = {
 		.task_priority = 4,
-		/* 16384：64B 缓存行下内部余量复测中，先降栈排查 */
-		.task_stack = 4096 * 4,
+		/* 8192：UI 极简（canvas+arc）；V-46c 驻留 AFE 后内部水位
+		 * 线紧（TLS esp-aes DMA 缓冲在 113k 自由下 ALLOC_FAILED），
+		 * 从栈里回收 8KB */
+		.task_stack = 4096 * 2,
 		.task_affinity = -1,
 		.task_max_sleep_ms = 500,
 		.timer_period_ms = 5,
@@ -847,7 +883,13 @@ static void wifi_start(const char *ssid, const char *pass)
 static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		     struct ks_llm_cfg *llm, bool embedded)
 {
-	static int16_t chunk[CAP_CHUNK];
+	static int16_t *chunk;	/* 6.4KB 暂存：PSRAM 懒分配（V-46c） */
+
+	if (!chunk)
+		chunk = heap_caps_malloc(CAP_CHUNK * 2,
+					 MALLOC_CAP_SPIRAM);
+	if (!chunk)
+		return -1;
 	int64_t t_trigger = esp_timer_get_time();
 	int64_t cap_start;
 	int64_t ftok = 0;
@@ -898,16 +940,23 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 			vTaskDelay(pdMS_TO_TICKS(100));
 		}
 	} else {
-		/* 真人轮协议：哔一声（200ms 1kHz）= 开始说话 */
-		static int16_t cue[3200];
+		/* 真人轮协议：哔一声（200ms 1kHz）= 开始说话。
+		 * 6.4KB 懒分配 PSRAM（V-46c 内部水位线） */
+		static int16_t *cue;
 
-		for (size_t i = 0; i < 3200; i++)
-			cue[i] = (int16_t)(4000.0f *
-				    sinf(2.0f * (float)M_PI * 1000.0f *
-					 (float)i / 16000.0f));
+		if (!cue)
+			cue = heap_caps_malloc(3200 * 2,
+					       MALLOC_CAP_SPIRAM);
+		if (cue)
+			for (size_t i = 0; i < 3200; i++)
+				cue[i] = (int16_t)(4000.0f *
+					sinf(2.0f * (float)M_PI * 1000.0f *
+					     (float)i / 16000.0f));
+
 		printf("VL,LIVE,beep=speak now %ds\r\n", CAP_SECONDS);
 		fflush(stdout);
-		aio_play(cue, 3200, 1000);
+		if (cue)
+			aio_play(cue, 3200, 1000);
 		static uint32_t cur_g;	/* 'g' 轮私有游标（跨轮连续） */
 
 		while (esp_timer_get_time() - cap_start <
@@ -1191,10 +1240,14 @@ void app_main(void)
 	if (pump_init() != 0)
 		return;
 
+	/* V-46c：语音前端常驻（"MR"+AEC，撤静音窗）——产品形态开机即
+	 * 听，打断与自唤醒免疫均由 AEC 链承担 */
+	wakenet_start(&tts, false, convo_notify_wake);
+
 	printf("VL,READY,keys: g=round t=embedded a=acoustic w=wakenet "
 	       "W=wn-selftest c=hands-free n=manual-wake C=auto-soak "
 	       "M=llm-toggle k=web-config o=ap-probe u=stats s=sd p=pa "
-	       "l=loopback e=emote-cycle R=align Y=aec (%d menu rounds)\r\n", ROUND_MAX);
+	       "l=loopback e=emote-cycle R=align Y=aec (%d menu rounds) [voice-always-on V-46c]\r\n", ROUND_MAX);
 	fflush(stdout);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
@@ -1356,8 +1409,13 @@ void app_main(void)
 		}
 		if (ch == 'n' || ch == 'N') {
 			/* 手动注入唤醒（无 wakenet 也能驱动 FSM 全链，
-			 * 嘈杂环境/无声学时的调试入口） */
-			if (convo_active()) {
+			 * 嘈杂环境/无声学时的调试入口）。SPEAKING 态=
+			 * 打断机制测试入口（与声学 BARGE 同一函数路径） */
+			if (convo_state_get() == CONVO_SPEAKING) {
+				pb_abort_playback();
+				convo_notify_wake();
+				printf("VL,CONVO,BARGE,manual\r\n");
+			} else if (convo_active()) {
 				convo_notify_wake();
 				printf("VL,CONVO,WAKE,manual\r\n");
 			} else {
@@ -1371,8 +1429,13 @@ void app_main(void)
 			continue;
 		}
 		if (ch == 'u') {
-			static char stats[4096];
+			static char *stats;
 
+			if (!stats)
+				stats = heap_caps_malloc(4096,
+							 MALLOC_CAP_SPIRAM);
+			if (!stats)
+				continue;
 			vTaskGetRunTimeStats(stats);
 			printf("%s\r\n", stats);
 			fflush(stdout);
