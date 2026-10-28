@@ -64,37 +64,50 @@ static void beep_play_task(void *arg)
 static void feed_task(void *arg)
 {
 	int chunk = s_afe->get_feed_chunksize(s_afe_data);
-	int16_t *buf = malloc(chunk * sizeof(int16_t));
+	int16_t *mic = heap_caps_aligned_alloc(16, chunk * 2,
+					       MALLOC_CAP_SPIRAM);
+	int16_t *ref = heap_caps_aligned_alloc(16, chunk * 2,
+					       MALLOC_CAP_SPIRAM);
+	int16_t *buf = heap_caps_aligned_alloc(16, chunk * 2 * 2,
+					       MALLOC_CAP_SPIRAM);
 	static uint32_t feed_cur;	/* V-46a：私有采音游标 */
 
 	(void)arg;
-	if (!buf) {
+	if (!mic || !ref || !buf) {
 		kf_log("VL,WN,ERROR=feed_alloc\r\n");
 		vTaskDelete(NULL);
 		return;
 	}
-	kf_log("VL,WN,FEED,chunk=%d\r\n", chunk);
+	kf_log("VL,WN,FEED,chunk=%d,aec=fd\r\n", chunk);
 	uint32_t feed_dbg = 0;
-	/* 核 0 喂音 / 核 1 检测（创建处绑核）。静音窗口恢复（V-46c
-	 * 回退）：AEC 驻留被 esp-sr AEC3 FFT 病理阻断（追记#7），
-	 * 自唤醒免疫暂由静音窗承担；AEC 修复后撤窗换打断监听 */
+	/* 核 0 喂音 / 核 1 检测（创建处绑核）。静音窗口撤销（V-46c 终局
+	 * ——FD_LOW_COST 实现分支绕开 SR 档 FFT 病理，杀手 soak 10/10）：
+	 * 全天候喂麦，自唤醒免疫由 AEC 承担，SPEAKING 命中=BARGE 打断 */
 	for (;;) {
-		while (convo_state_get() != CONVO_OFF &&
-		       convo_state_get() != CONVO_IDLE)
-			vTaskDelay(pdMS_TO_TICKS(50));
-		int n = aio_capture_stream(buf, chunk, 2000, &feed_cur);
+		int n = aio_capture_stream(mic, chunk, 2000, &feed_cur);
 
 		if (n < chunk)
-			memset(buf + n, 0, (chunk - n) * sizeof(int16_t));
+			memset(mic + n, 0, (chunk - n) * sizeof(int16_t));
+		/* 参考窗 = 写游标 − 在飞深度 − 本块（V-46b 对齐法） */
+		int32_t off = aec_align_offset();
+
+		if (off < 0)
+			off = 2560;
+		if (!aio_ref_get(ref, chunk,
+				 aio_ref_now() - (uint32_t)off -
+				 (uint32_t)chunk))
+			memset(ref, 0, chunk * 2);
+		memcpy(buf, mic, chunk * 2);
+		memcpy(buf + chunk, ref, chunk * 2);
 		/* 调试仪表：喂入侧 RMS（与 detect 侧 DBGVOL 对账，分界
 		 * AFE 内外） */
 		if (kf_dbg_get() && ++feed_dbg % 25 == 0) {
 			int64_t sq = 0;
 
-			for (int i = 0; i < n; i++)
-				sq += (int32_t)buf[i] * buf[i];
-			kf_log("WN,DBGIN,n=%d,rms=%.1f", n,
-			       n ? sqrtf((float)sq / n) : 0.0f);
+			for (int i = 0; i < chunk; i++)
+				sq += (int32_t)mic[i] * mic[i];
+			kf_log("WN,DBGIN,n=%d,rms=%.1f", chunk,
+			       sqrtf((float)sq / chunk));
 		}
 		s_afe->feed(s_afe_data, buf);
 	}
@@ -241,10 +254,15 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	 * 分配两态对照同挂，convo 栈排除）——证据包入门禁追记#7，
 	 * 待上游修复或下轮专攻。暂回 "M" 无 AEC + 静音窗（已证稳定），
 	 * 打断管线保留（pb/TX 中止+路由），AEC 修复即配置翻转 */
-	afe_config_t *cfg = afe_config_init("M", models, AFE_TYPE_SR,
+	/* V-46c 缺陷 A 临时方案实验（GitHub 调研后）：官方 P4 AEC 文档
+	 * 推荐 FD_LOW_COST（SR 模式仅线性滤波，FD 带 NLP）；缓冲须 16B
+	 * 对齐；P4 性能数据在 L2 128B 行下标定（我们 64B=未测区） */
+	afe_config_t *cfg = afe_config_init("MR", models, AFE_TYPE_SR,
 					    AFE_MODE_HIGH_PERF);
 
-	cfg->aec_init = false;
+	cfg->aec_init = true;
+	cfg->aec_mode = AEC_MODE_FD_LOW_COST;
+	cfg->aec_filter_length = 4;
 	cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 	/* 无 afe_config_check：V-40 实证 9/10 命中的原版路径未调用它，
 	 * 其"修正"在本板配置下会破坏唤醒检测（V-46c 真人测试日 diff
