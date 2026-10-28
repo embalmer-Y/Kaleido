@@ -321,7 +321,8 @@ static void soul_tick(void)
 			s_quiet_ticks++;
 		}
 		if (idle_now && configured) {
-			bool activity_ended = idle_now && !s_prev_idle(s_prev_st);
+			bool activity_ended =
+				idle_now && !s_prev_idle(s_prev_st);
 			const char *clip = emo_clip_pick(&kout, &dout,
 					s_quiet_ticks >= SOUL_ASPLEEP_TICKS);
 
