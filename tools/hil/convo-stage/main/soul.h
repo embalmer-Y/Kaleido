@@ -52,6 +52,8 @@ struct ks_llm_cfg;
 void soul_convo_bind(struct ks_tts_cfg *tts, struct ks_llm_cfg *llm);
 /* HIL 时间压缩档开关（'d' 键；仅 debug 会话使用，产品态不开） */
 void soul_fast_drain(bool on);
+/* 'i' 强制思维（HIL：跳过触发闸判据；parse/出口门/结算照常） */
+void soul_force_think(void);
 uint32_t soul_tick_count(void);
 
 #endif /* SOUL_H */

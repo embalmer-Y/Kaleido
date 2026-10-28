@@ -24,6 +24,7 @@
 #include "kaleido_core.h"
 #include "kaleido_secret.h"
 #include "soul.h"
+#include "soul_think.h"
 
 #define SOUL_TICK_MS	1000
 
@@ -50,6 +51,10 @@ static const struct kd_params s_fast_bench = {
 					 * 故两模式同为 ~10min）→ 睡着 */
 
 static SemaphoreHandle_t s_lock;	/* 快照拷贝锁 */
+static bool s_force_think;		/* 'i' 强制（临界区外 BOOL 单写） */
+static uint8_t s_bin_prev;		/* W3 影响分箱（跃迁沿检测） */
+static bool s_bin_valid;
+static bool s_bin_changed;		/* 跃迁沿（think 启动后清） */
 static bool s_configured;		/* OOBE 配置态（start 时缓存——
 	 * PSRAM 栈任务禁碰 NVS/flash：cache 关断窗口断言
 	 * esp_task_stack_is_sane_cache_disabled，W1 首板实证） */
@@ -89,11 +94,14 @@ void soul_on_round(bool ok)
 {
 	pend_push(ok ? KD_EVT_ROUND_OK : KD_EVT_ROUND_FAIL,
 		  ok ? KE_RECEIPT_SUCCESS : KE_RECEIPT_FAIL);
+	soul_think_on_event();
 }
 
 void soul_on_barge(void)
 {
 	pend_push(KD_EVT_BARGE, KE_RECEIPT_NONE);
+	soul_think_on_event();
+	soul_think_note_barge();
 }
 
 void soul_on_mood(float delta)
@@ -145,13 +153,37 @@ void soul_on_voice(void)
 	s_last_voice_us = now;
 	portEXIT_CRITICAL(&s_mux);
 	pend_push(KD_EVT_VOICE, KE_RECEIPT_NONE);
+	soul_think_on_event();
+	soul_think_note_voice();	/* 结算窗证据（不限频） */
 }
 
 void soul_fast_drain(bool on)
 {
 	kd_init(on ? &s_fast_bench : NULL);
 	/* kd_init 仅换参数指针（const 表），水平保持——压缩前后连续 */
+	soul_think_set_compress(on);	/* 思维时钟同步 ×6（W3 HIL） */
 	kf_log("VL,SOUL,FAST,%s\r\n", on ? "on" : "off");
+}
+
+void soul_force_think(void)
+{
+	s_force_think = true;
+}
+
+/* 影响分箱：anim_tag 桶 ×urgency 档 ×valence 符号（SELF_REPORT 范本） */
+static uint8_t bin_hash(const struct ke_output *e)
+{
+	static const char *const tags[] = {
+		"happy", "relaxed", "angry", "sad", "surprised",
+		"confused", "sleepy",
+	};
+	uint8_t t;
+
+	for (t = 0; t < 7 && strcmp(tags[t], e->anim_tag); t++)
+		;
+	return (uint8_t)(t * 4 +
+			 (e->state.urgency >= 0.5f ? 2 : 0) +
+			 (e->state.valence < 0.0f ? 1 : 0));
 }
 
 uint32_t soul_tick_count(void)
@@ -354,6 +386,61 @@ static void soul_tick(void)
 		xSemaphoreGive(s_lock);
 	}
 	s_ticks++;
+
+	/* W3 思维触发闸：每拍纯检查；云调用在 think 任务（单飞） */
+	{
+		uint8_t h = bin_hash(&kout);
+
+		if (s_bin_valid && h != s_bin_prev)
+			s_bin_changed = true;	/* 跃迁沿（非电平） */
+		s_bin_prev = h;
+		s_bin_valid = true;
+	}
+	{
+		struct ki_think_ctx tc = {
+			.arousal = kout.state.arousal,
+			.urgency_max = dout.error_max,
+			.pending_command = convo_active(),
+			.bin_changed = s_bin_changed,
+			.new_event = false,     /* 由 soul_think 维护 */
+			.score = idec.score,
+		};
+
+		soul_think_gate_ctx(&tc);
+		{
+			struct ki_think_gate tg;
+
+			ki_think_gate(&tc, &tg);
+			bool forced = s_force_think;
+
+			if (forced) {
+				s_force_think = false;
+				tg.trigger = true;
+				tg.blocked_mask = 0;
+			}
+			if (tg.trigger && s_ticks < 60 &&
+			    !forced) {
+				tg.trigger = false;  /* 开机静默 60s：
+					    * WiFi 未稳/不被打扰 */
+				kf_ev("ki", "boot grace");
+			}
+			if (tg.trigger) {
+				if (soul_think_start(tg.reason_mask,
+						     forced, idec.score))
+					s_bin_changed = false;
+				else
+					kf_ev("ki", "busy drop");
+			} else if (tg.blocked_mask && kf_dbg_get()) {
+				static uint32_t s_blk_log;
+
+				if (s_ticks - s_blk_log >= 60) {
+					s_blk_log = s_ticks;
+					kf_log("VL,KI,GATE,blocked=%u"
+					       "\r\n", tg.blocked_mask);
+				}
+			}
+		}
+	}
 
 	/* SOUL 遥测：debug 态逐拍；常态 15s 一行（KF 单写者通道） */
 	if (kf_dbg_get() || s_ticks % SOUL_TELEM_QUIET_S == 0) {

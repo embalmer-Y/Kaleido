@@ -59,6 +59,7 @@
 #include "aec_probe.h"
 #include "stage_express.h"
 #include "soul.h"
+#include "soul_think.h"
 
 #define CAP_SECONDS	30 /* 负责人要求：真人轮 30s 窗防错过（'t' 内置轮不受影响）*/
 
@@ -1235,11 +1236,13 @@ void app_main(void)
 
 	/* V-46c：语音前端常驻（产品形态开机即听）。唤醒=自动开会话 */
 	wakenet_start(&tts, false, wake_handler);
+	soul_think_init(&tts, &llm);/* W3 思维轮：置 wakenet 后（16KB
+				     * 内部栈避开 AFE 大块窗口） */
 
 	kf_log("VL,READY,keys: g=round t=embedded a=acoustic w=wakenet "
 	       "W=wn-selftest c=hands-free n=manual-wake C=auto-soak "
 	       "M=llm-toggle k=web-config o=ap-probe u=stats s=sd p=pa "
-	       "l=loopback e=emote-cycle R=align Y=aec m/f/b/j=soul-inject (%d menu rounds) [voice-always-on V-46c]\r\n", ROUND_MAX);
+	       "l=loopback e=emote-cycle R=align Y=aec m/f/b/j=soul-inject i=think (%d menu rounds) [voice-always-on V-46c]\r\n", ROUND_MAX);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
 		bool round_key = (ch == 'g' || ch == 'G' || ch == 't' ||
@@ -1399,6 +1402,28 @@ void app_main(void)
 			} else {
 				kf_log("VL,CONVO,OFF,press-c-first\r\n");
 			}
+			continue;
+		}
+		if (ch == 'h') {
+			/* W3 HIL 假意图直注：跳深思 LLM（执行/结算同套） */
+			struct ki_intent hil = {
+				.act = KI_SPEAK,
+				.content = "你在吗？我在这里哦。",
+				.confidence = 0.9f,
+				.evidence_mask = 1u << 0,
+				.reason = "hil inject",
+			};
+
+			if (soul_think_inject(&hil))
+				kf_log("VL,KI,INJECT,ok\r\n");
+			else
+				kf_log("VL,KI,INJECT,busy\r\n");
+			continue;
+		}
+		if (ch == 'i') {
+			/* W3 强制思维（HIL：跳触发闸；门/结算照常） */
+			soul_force_think();
+			kf_log("VL,KI,FORCE,req\r\n");
 			continue;
 		}
 		if (ch == 'd') {

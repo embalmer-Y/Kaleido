@@ -43,6 +43,7 @@ cat > "$TMP/ke_main.c" <<'UEOF'
 void drive_tests_main(void);
 void emotion_tests_main(void);
 void ignition_tests_main(void);
+void ignition_w3_tests_main(void);
 void setUp(void) {}
 void tearDown(void) {}
 int main(void)
@@ -54,6 +55,8 @@ int main(void)
 	emotion_tests_main();
 	fail += Unity.TestFailures;
 	ignition_tests_main();
+	fail += Unity.TestFailures;
+	ignition_w3_tests_main();
 	fail += Unity.TestFailures;
 	return fail ? 1 : 0;
 }
@@ -67,6 +70,7 @@ gcc -Wall -I"$FW/components/kaleido_drive/include" \
 	"$FW/components/kaleido_emotion/test/test_kaleido_emotion.c" \
 	"$FW/components/kaleido_emotion/src/kaleido_emotion.c" \
 	"$FW/components/kaleido_ignition/test/test_kaleido_ignition.c" \
+	"$FW/components/kaleido_ignition/test/test_kaleido_ignition_w3.c" \
 	"$FW/components/kaleido_ignition/src/kaleido_ignition.c" \
 	"$UNITY/src/unity.c" -lm
 "$TMP/soul"

@@ -5,10 +5,12 @@
 void drive_tests_main(void);
 void emotion_tests_main(void);
 void ignition_tests_main(void);
+void ignition_w3_tests_main(void);
 
 void app_main(void)
 {
 	drive_tests_main();
 	emotion_tests_main();
 	ignition_tests_main();
+	ignition_w3_tests_main();
 }
