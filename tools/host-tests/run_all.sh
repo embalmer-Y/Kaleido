@@ -21,23 +21,34 @@ run() {  # name main.c extra_src...
 run memory "$FW/tools/host-tests/km_host_test.c"
 run persona "$FW/tools/host-tests/kp_host_test.c"
 
-# emotion/ignition：Unity 直编（主机 main 包装 unity_runner）
+# 灵魂三件（drive/emotion/ignition）：Unity 直编（主机 main 包装
+# unity_runner）；emotion 套件含 kd→ke 全链锚，须三源同链
 cat > "$TMP/ke_main.c" <<'UEOF'
 #include "unity_internals.h"
+void drive_tests_main(void);
 void emotion_tests_main(void);
 void ignition_tests_main(void);
 void setUp(void) {}
 void tearDown(void) {}
 int main(void)
 {
+	int fail = 0;
+
+	drive_tests_main();
+	fail += Unity.TestFailures;   /* UNITY_BEGIN 会清零，逐套件累计 */
 	emotion_tests_main();
+	fail += Unity.TestFailures;
 	ignition_tests_main();
-	return Unity.TestFailures ? 1 : 0;
+	fail += Unity.TestFailures;
+	return fail ? 1 : 0;
 }
 UEOF
-gcc -Wall -I"$FW/components/kaleido_emotion/include" \
+gcc -Wall -I"$FW/components/kaleido_drive/include" \
+	-I"$FW/components/kaleido_emotion/include" \
 	-I"$FW/components/kaleido_ignition/include" -I$UNITY/src \
 	-o "$TMP/soul" "$TMP/ke_main.c" \
+	"$FW/components/kaleido_drive/test/test_kaleido_drive.c" \
+	"$FW/components/kaleido_drive/src/kaleido_drive.c" \
 	"$FW/components/kaleido_emotion/test/test_kaleido_emotion.c" \
 	"$FW/components/kaleido_emotion/src/kaleido_emotion.c" \
 	"$FW/components/kaleido_ignition/test/test_kaleido_ignition.c" \

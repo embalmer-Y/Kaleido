@@ -69,6 +69,9 @@ struct ks_tts_cfg {
 	const char *model;      /* speech-2.5-hd-preview / cosyvoice  */
 	const char *voice;      /* 预置音色或复刻 voice_id             */
 	int sample_rate;        /* 16000（pcm s16le 直推 I2S）         */
+	float speech_rate;      /* 语速 [0.5,2]；0=不传（provider 缺省，
+				 * W2 情感调制 tts_hint.rate 消费点）  */
+	int pitch;              /* 半音 [-12,12]；0=不传（同上）       */
 };
 
 /* 合成 PCM 下行（s16le @cfg->sample_rate，单声道） */

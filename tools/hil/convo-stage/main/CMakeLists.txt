@@ -5,7 +5,7 @@
 #                       RGB565 画布直写合成；thorvg/lottie 版见 git 历史）
 idf_component_register(SRCS "convo_stage_main.c" "stage_express.c" "emote_stage.c"
                               "audio_io.c" "wakenet_test.c" "provision.c"
-                              "clause_pump.c" "convo_fsm.c" "aec_probe.c"
+                              "clause_pump.c" "convo_fsm.c" "aec_probe.c" "soul.c"
                        INCLUDE_DIRS "."
                        EMBED_FILES "test_prompt.pcm"
                        PRIV_REQUIRES esp_wifi esp_netif esp_event nvs_flash
@@ -18,4 +18,5 @@ idf_component_register(SRCS "convo_stage_main.c" "stage_express.c" "emote_stage.
                                      esp_lcd_jd9366 esp_lcd_touch_jd9366
                                      kaleido_speech kaleido_secret kaleido_express
                                      fatfs sdmmc espressif__esp-sr kaleido_core
-                                     espressif2022__esp_emote_gen_player)
+                                     espressif2022__esp_emote_gen_player
+                                     kaleido_drive kaleido_emotion kaleido_ignition)

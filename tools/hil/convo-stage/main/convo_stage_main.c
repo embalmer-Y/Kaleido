@@ -58,6 +58,7 @@
 #include "kaleido_core.h"
 #include "aec_probe.h"
 #include "stage_express.h"
+#include "soul.h"
 
 #define CAP_SECONDS	30 /* 负责人要求：真人轮 30s 窗防错过（'t' 内置轮不受影响）*/
 
@@ -1225,13 +1226,17 @@ void app_main(void)
 	if (pump_init() != 0)
 		return;
 
+	/* W0-3：灵魂 limb 常驻（1Hz kd/ke/ki 单写者；candidate 仅遥测，
+	 * 主动动作等 W3 思维触发闸） */
+	soul_start();
+
 	/* V-46c：语音前端常驻（产品形态开机即听）。唤醒=自动开会话 */
 	wakenet_start(&tts, false, wake_handler);
 
 	kf_log("VL,READY,keys: g=round t=embedded a=acoustic w=wakenet "
 	       "W=wn-selftest c=hands-free n=manual-wake C=auto-soak "
 	       "M=llm-toggle k=web-config o=ap-probe u=stats s=sd p=pa "
-	       "l=loopback e=emote-cycle R=align Y=aec (%d menu rounds) [voice-always-on V-46c]\r\n", ROUND_MAX);
+	       "l=loopback e=emote-cycle R=align Y=aec m/M/b/j=soul-inject (%d menu rounds) [voice-always-on V-46c]\r\n", ROUND_MAX);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
 		bool round_key = (ch == 'g' || ch == 'G' || ch == 't' ||
@@ -1391,6 +1396,30 @@ void app_main(void)
 			} else {
 				kf_log("VL,CONVO,OFF,press-c-first\r\n");
 			}
+			continue;
+		}
+		if (ch == 'd') {
+			/* 灵魂时间压缩档（HIL；debug 态才响应） */
+			static bool s_fast;
+
+			if (kf_dbg_get()) {
+				s_fast = !s_fast;
+				soul_fast_drain(s_fast);
+			}
+			continue;
+		}
+		if (ch == 'm' || ch == 'M' || ch == 'b' || ch == 'j') {
+			/* W0 灵魂注入器（V-48a）：无真人驱动驱力/回执闭环。
+			 * m=轮成 M=轮败 b=打断 j=人声（内部限频） */
+			if (ch == 'm')
+				soul_on_round(true);
+			else if (ch == 'M')
+				soul_on_round(false);
+			else if (ch == 'b')
+				soul_on_barge();
+			else
+				soul_on_voice();
+			kf_log("VL,SOUL,INJ,%c\r\n", ch);
 			continue;
 		}
 		if (ch == 'w') {

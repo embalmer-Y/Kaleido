@@ -230,6 +230,14 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 		cJSON *vs = cJSON_AddObjectToObject(root, "voice_setting");
 
 		cJSON_AddStringToObject(vs, "voice_id", s_mm.cfg->voice);
+		/* 情感调制通道（W2 tts_hint 消费；0 值不传=provider 缺省，
+		 * 保持既有请求形态不变——防 JSON 兼容性回退） */
+		if (s_mm.cfg->speech_rate > 0.0f)
+			cJSON_AddNumberToObject(vs, "speech_rate",
+						s_mm.cfg->speech_rate);
+		if (s_mm.cfg->pitch != 0)
+			cJSON_AddNumberToObject(vs, "pitch",
+						s_mm.cfg->pitch);
 	}
 	{
 		cJSON *as = cJSON_AddObjectToObject(root, "audio_setting");

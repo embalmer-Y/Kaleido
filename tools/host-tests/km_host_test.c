@@ -1,8 +1,11 @@
 /* host 回归：append→query(tag/keyword/time)→backup→seq 重载 */
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <time.h>
 #include "kaleido_memory.h"
 
@@ -12,6 +15,9 @@ int main(void)
 	struct km_hit hits[KM_QUERY_TOP];
 	int n;
 
+	/* 封闭性：目录自建（km 组件不 mkdir；tmpfs 重启后旧目录不在） */
+	assert(mkdir("/tmp/v33", 0755) == 0 || errno == EEXIST);
+	assert(mkdir("/tmp/v33/kmtest", 0755) == 0 || errno == EEXIST);
 	unlink("/tmp/v33/kmtest/ep.jsonl");
 	unlink("/tmp/v33/kmtest/core.json");
 	assert(km_init("/tmp/v33/kmtest/ep.jsonl",
