@@ -23,7 +23,7 @@ static const struct kd_params s_fast = {
 	/* pulse/stim_event 缺省=0：用例单独给（0 覆盖语义清晰） */
 };
 
-/* 告警边界表（已由 test_severity_boundaries 的精确参数版取代） */
+/* 脉冲表（C1 整改用：非零 stim_event，验证 stim 通路） */
 
 static void test_reset_full_levels(void)
 {
@@ -110,7 +110,7 @@ static void test_severity_boundaries(void)
 	}
 }
 
-/* 脉冲恢复：ROUND_OK social +0.15 / stim +0.10；trend 翻负（好转） */
+/* 脉冲恢复（social 通路）：ROUND_OK +0.15；trend 翻负（好转） */
 static void test_pulse_recovery(void)
 {
 	struct kd_inputs in = { 0 };
@@ -134,32 +134,61 @@ static void test_pulse_recovery(void)
 	in.event = KD_EVT_ROUND_OK;
 	kd_step(1, &in, &out);              /* 0.9−0.1+0.15=0.95 */
 	TEST_ASSERT_TRUE(feq(out.level[KD_SOCIAL], 0.95f));
-	TEST_ASSERT_TRUE(feq(out.level[KD_STIM], 1.0f)); /* 满值钳位不溢 */
 	TEST_ASSERT_TRUE(feq(out.trend[KD_SOCIAL], -0.05f));
 }
 
-/* ROUND_FAIL 小恢复 + VOICE/TOUCH 小脉冲（仅 social；stim 不动） */
-static void test_small_pulses_social_only(void)
+/* stim 通路专测（评审 C1：原断言被满值钳位掩蔽，stim 分支曾可整段
+ * 删掉仍全绿）。参数全二进制精确：0.875−0.125+0.25=1.0 无浮点噪声 */
+static void test_stim_path(void)
 {
 	struct kd_inputs in = { 0 };
 	struct kd_output out;
 	const struct kd_params p = {
-		.metabolic = { 0.1f, 0.0f, 0.0f },
-		.pulse = {
-			[KD_EVT_ROUND_FAIL] = 0.03f,
-			[KD_EVT_VOICE] = 0.005f,
-			[KD_EVT_TOUCH] = 0.05f,
-		},
+		.metabolic = { 0.0f, 0.125f, 0.0f },
+		.pulse = { [KD_EVT_ROUND_OK] = 0.15f },
+		.stim_event = 0.25f,        /* BARGE 同走此参数 */
 		.band = 0.1f,
 	};
 
 	kd_init(&p);
 	kd_reset();
-	kd_step(0, &in, &out);              /* social 0.9 */
+	kd_step(0, &in, &out);
+	TEST_ASSERT_TRUE(feq(out.level[KD_STIM], 0.875f));
+	in.event = KD_EVT_ROUND_OK;
+	kd_step(1, &in, &out);              /* 0.875−0.125+0.25 */
+	TEST_ASSERT_TRUE(feq(out.level[KD_STIM], 1.0f));
+	in.event = KD_EVT_NONE;
+	kd_step(2, &in, &out);
+	in.event = KD_EVT_BARGE;
+	kd_step(3, &in, &out);              /* 0.875−0.125+0.25 再证 */
+	TEST_ASSERT_TRUE(feq(out.level[KD_STIM], 1.0f));
+	TEST_ASSERT_TRUE(feq(out.level[KD_SOCIAL], 1.0f)); /* BARGE 喂
+					    * social +0.05，满值钳位 1.0 */
+}
+
+/* 小脉冲仅 social（评审 C1 整改：stim 预降位后断言 FAIL 不喂 stim） */
+static void test_small_pulses_social_only(void)
+{
+	struct kd_inputs in = { 0 };
+	struct kd_output out;
+	const struct kd_params p = {
+		.metabolic = { 0.1f, 0.125f, 0.0f },
+		.pulse = {
+			[KD_EVT_ROUND_FAIL] = 0.03f,
+			[KD_EVT_VOICE] = 0.005f,
+			[KD_EVT_TOUCH] = 0.05f,
+		},
+		.band = 0.1f,               /* stim_event=0：FAIL 期无刺激源 */
+	};
+
+	kd_init(&p);
+	kd_reset();
+	kd_step(0, &in, &out);              /* social 0.9 / stim 0.875 */
 	in.event = KD_EVT_ROUND_FAIL;
-	kd_step(1, &in, &out);              /* 0.9−0.1+0.03 */
+	kd_step(1, &in, &out);              /* social 0.9−0.1+0.03 */
 	TEST_ASSERT_TRUE(feq(out.level[KD_SOCIAL], 0.83f));
-	TEST_ASSERT_TRUE(feq(out.level[KD_STIM], 1.0f)); /* FAIL 不喂 stim */
+	TEST_ASSERT_TRUE(feq(out.level[KD_STIM], 0.75f)); /* 仅代谢：
+					    * 若误喂 FAIL 脉冲则 ≠0.75 */
 	in.event = KD_EVT_VOICE;
 	kd_step(2, &in, &out);              /* 0.83−0.1+0.005 */
 	TEST_ASSERT_TRUE(feq(out.level[KD_SOCIAL], 0.735f));
@@ -228,6 +257,7 @@ void drive_tests_main(void)
 	RUN_TEST(test_metabolic_decay_precise);
 	RUN_TEST(test_severity_boundaries);
 	RUN_TEST(test_pulse_recovery);
+	RUN_TEST(test_stim_path);
 	RUN_TEST(test_small_pulses_social_only);
 	RUN_TEST(test_rest_recover);
 	RUN_TEST(test_input_robustness);

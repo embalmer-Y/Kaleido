@@ -83,7 +83,8 @@ void kd_step(uint64_t tick, const struct kd_inputs *in,
 		return;
 	if (!s_p)
 		kd_init(NULL);
-	evt = in->event < KD_EVT_CNT ? in->event : KD_EVT_NONE;
+	evt = (unsigned)in->event < KD_EVT_CNT ? in->event :
+					     KD_EVT_NONE; /* 显式无符号比较（C6） */
 
 	for (d = 0; d < KD_N; d++) {
 		float inflow = 0.0f;

@@ -246,30 +246,8 @@ static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 	kf_task_psram("asr_close", 4096, asr_closer_task, NULL, 5, 0,
 		      (void **)&s_close_stk, &s_close_tcb);
 
-	/* W2：情感→会话。TTS hint（tts_hint→speech_rate/pitch，MiniMax
-	 * feed 时读 cfg）+ 系统提示词动态组装（基座人格+soul 尾段） */
-	{
-		static char s_sys_dyn[640];
-		struct soul_snap snap;
-
-		soul_snapshot(&snap);
-		s_tts->speech_rate = snap.emo.tts_hint.rate;
-		s_tts->pitch = (int)(snap.emo.tts_hint.pitch >= 0 ?
-				     snap.emo.tts_hint.pitch + 0.5f :
-				     snap.emo.tts_hint.pitch - 0.5f);
-		kf_log("VL,SOUL,TTS,tag=%s,rate=%.2f,pitch=%d\r\n",
-		       snap.emo.anim_tag, s_tts->speech_rate, s_tts->pitch);
-		snprintf(s_sys_dyn, sizeof(s_sys_dyn), "%s%s",
-			 s_llm->system ? s_llm->system : "",
-			 soul_prompt_suffix());
-		s_llm->system = s_sys_dyn;
-		if (kf_dbg_get()) {
-			kf_log("VL,SOUL,PROMPT,len=%d\r\n",
-			       (int)strlen(s_sys_dyn));
-			kf_log_raw(s_sys_dyn);
-			kf_log_raw("\r\n");
-		}
-	}
+	/* W2：TTS hint + prompt 重组（评审 M-01：基座缓存防逐轮累积） */
+	soul_convo_bind(s_tts, s_llm);
 	if (pump_tts_attach(s_tts, on_tts_pcm) != 0)
 		return -5;
 	s_llm->user_msg = s_full;

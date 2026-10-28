@@ -62,10 +62,13 @@ struct kd_params {           /* 冻结表（内置 static const；可 kd_init �
 };
 
 struct kd_inputs {
-	uint64_t tick;
-	bool active;             /* 本拍在表达（TTS/动画）→ rest 代谢照常 */
+	uint64_t tick;           /* 预留（当前未消费，调用方单调供给）    */
+	bool active;             /* 预留：当前恒代谢口径（plan §5R.1）下
+				  * 不消费——有意偏离 28 号 §9.2 表，W3/W6
+				  * 接线人勿按"表达中才代谢"误读（评审 C2）*/
 	bool quiet;              /* 本拍静息（idle 且无播放）→ rest 恢复  */
-	bool charging;           /* 充电中 → rest 恢复（叠加）            */
+	bool charging;           /* 充电中 → rest 恢复（与 quiet 同路
+				  * 同份，不叠加——28 号 §9.2 表口径）    */
 	enum kd_event event;     /* 本拍交互事件（至多一个；多事件分拍喂）*/
 };
 
@@ -78,8 +81,10 @@ struct kd_output {
 	float trend[KD_N];       /* e_t − e_{t−1}（正=恶化，随告警上遥测）*/
 };
 
-void kd_init(const struct kd_params *p);   /* NULL = 用内置冻结表 */
-void kd_reset(void);                       /* level 全 1.0（初始态零误差语义） */
+void kd_init(const struct kd_params *p);   /* NULL = 用内置冻结表；
+					    * p 须静态生存期（组件只存
+					    * 指针，评审 C4） */
+void kd_reset(void);                      /* level 全 1.0（初始零误差） */
 void kd_step(uint64_t tick, const struct kd_inputs *in,
 	     struct kd_output *out);
 

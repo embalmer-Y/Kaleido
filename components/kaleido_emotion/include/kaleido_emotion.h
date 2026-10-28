@@ -88,11 +88,17 @@ struct ke_reappraisal {
 	uint64_t receipt_id; /* 回执编号（调用方生成，>0）     */
 };
 
+/* 重评价三件套（评审 C3 契约）：与 ke_step **同任务**调用（组件
+ * 文件级 static 无锁——soul tick 单写者持有；异任务请求须经调用方
+ * 侧的 pending 漏斗，如 soul_on_mood）。返回 0 成功；-1 参数错
+ * （req 空/receipt_id 0）；-2 delta 越界。 */
 int ke_reappraisal_request(const struct ke_reappraisal *req);
 bool ke_reappraisal_receipt(uint64_t receipt_id); /* 是否已生效 */
 float ke_reappraisal_applied(void);   /* 最近一次实际施加量（审计用） */
 
-/* 引擎：ke_step 每拍调用（tick 单调递增，仅用于回执台账） */
+/* 引擎：ke_step 每拍调用（tick 预留未消费；台账键=调用方 receipt_id，
+ * 评审 C7）。ke_state_snapshot 返回内部指针——仅当拍借用，ke_reset
+ * 后失效；跨任务取状态用拷贝（soul_snapshot 模式）。 */
 void ke_step(uint64_t tick, const struct ke_inputs *in,
 	     struct ke_output *out);
 const struct ke_state *ke_state_snapshot(void);

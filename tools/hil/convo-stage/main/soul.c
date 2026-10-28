@@ -20,6 +20,7 @@
 
 #include "convo_fsm.h"
 #include "emote_stage.h"
+#include "kaleido_speech.h"
 #include "kaleido_core.h"
 #include "kaleido_secret.h"
 #include "soul.h"
@@ -44,8 +45,9 @@ static const struct kd_params s_fast_bench = {
 #define SOUL_VOICE_MIN_MS	5000	/* VOICE 脉冲限频（28 号 §9.3 防刷） */
 #define SOUL_TELEM_QUIET_S	15	/* 常态遥测降频（debug 态逐拍） */
 #define SOUL_EMO_DWELL		8	/* 片段最短驻留（拍）——防抖动 */
-#define SOUL_ASPLEEP_TICKS	600	/* 连续安静 600 拍（~10min；压缩档
-					 * 10s）→ 睡着（asleep_215s） */
+#define SOUL_ASPLEEP_TICKS	600	/* 连续安静 600 拍（拍恒 1s——
+					 * 压缩档只加速代谢不改拍频，
+					 * 故两模式同为 ~10min）→ 睡着 */
 
 static SemaphoreHandle_t s_lock;	/* 快照拷贝锁 */
 static bool s_configured;		/* OOBE 配置态（start 时缓存——
@@ -65,9 +67,17 @@ static uint32_t s_mood_seq;
 static void pend_push(enum kd_event evt, enum ke_receipt rc)
 {
 	portENTER_CRITICAL(&s_mux);
+	/* 优先级：BARGE/ROUND_*（社交主信号）粘滞——不被 VOICE/TOUCH
+	 * 弱脉冲覆盖（评审 C10/M-03：防止 eat 锚 +0.15 主脉冲被
+	 * 5s 限频的 VOICE +0.005 顶掉）；同级最新覆盖（重复事件分拍
+	 * 喂，取最近语义）。 */
 	if (evt != KD_EVT_NONE) {
-		/* 强信号覆盖弱信号；ROUND_* 互不覆盖对方（最新结算生效） */
-		if (evt == KD_EVT_BARGE || s_pend_evt != KD_EVT_BARGE)
+		bool weak_new = (evt == KD_EVT_VOICE ||
+				 evt == KD_EVT_TOUCH);
+		bool weak_pend = (s_pend_evt == KD_EVT_VOICE ||
+				  s_pend_evt == KD_EVT_TOUCH);
+
+		if (!weak_new || !s_pend_evt || weak_pend)
 			s_pend_evt = evt;
 	}
 	if (rc != KE_RECEIPT_NONE)
@@ -198,6 +208,39 @@ static const char *emo_clip_pick(const struct ke_output *emo,
 	return "smile_static";			/* 平静基线 */
 }
 
+/* ---- W2 轮起手（评审 M-01 整改：基座缓存防逐轮累积） ---- */
+void soul_convo_bind(struct ks_tts_cfg *tts, struct ks_llm_cfg *llm)
+{
+	static char s_sys_dyn[640];	/* 当轮有效；单轮单任务串行 */
+	static const char *s_base;	/* 首轮缓存的人格基座 */
+
+	if (!s_base)
+		s_base = llm->system;	/* 首轮原样（此后 llm->system 指
+					 * s_sys_dyn，不可再作基座源） */
+	if (tts) {
+		struct soul_snap snap;
+
+		soul_snapshot(&snap);
+		tts->speech_rate = snap.emo.tts_hint.rate;
+		tts->pitch = (int)(snap.emo.tts_hint.pitch >= 0 ?
+				   snap.emo.tts_hint.pitch + 0.5f :
+				   snap.emo.tts_hint.pitch - 0.5f);
+		kf_log("VL,SOUL,TTS,tag=%s,rate=%.2f,pitch=%d\r\n",
+		       snap.emo.anim_tag, tts->speech_rate, tts->pitch);
+	}
+	if (llm) {
+		snprintf(s_sys_dyn, sizeof(s_sys_dyn), "%s%s",
+			 s_base ? s_base : "", soul_prompt_suffix());
+		llm->system = s_sys_dyn;
+		if (kf_dbg_get()) {
+			kf_log("VL,SOUL,PROMPT,len=%d\r\n",
+			       (int)strlen(s_sys_dyn));
+			kf_log_raw(s_sys_dyn);
+			kf_log_raw("\r\n");
+		}
+	}
+}
+
 /* ---- 1Hz tick（唯一写者） ---- */
 
 static void soul_tick(void)
@@ -221,7 +264,8 @@ static void soul_tick(void)
 	s_pend_receipt = KE_RECEIPT_NONE;
 	portEXIT_CRITICAL(&s_mux);
 
-	/* 驱力输入（28 号 §9.3 映射：表达中=active 代谢；待机=quiet 恢复） */
+	/* 驱力输入（28 号 §9.3 映射）。active 为预留位（评审 C2：当前
+	 * 恒代谢口径，rest 代谢不因表达暂停）；quiet=待机拍 rest 恢复 */
 	memset(&din, 0, sizeof(din));
 	din.tick = s_ticks;
 	din.active = (st == CONVO_SPEAKING || st == CONVO_THINKING);

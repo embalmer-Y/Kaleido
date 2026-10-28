@@ -42,6 +42,14 @@ void soul_on_mood(float delta); /* W2：LLM mood 标签→有界重评价（经
 				 * 单写者通道，下一拍经 ke_reappraisal 生效） */
 const char *soul_prompt_suffix(void); /* W2：九维→系统提示词尾段（调用
 				 * 方上下文构建，静态缓冲当轮有效）     */
+
+struct ks_tts_cfg;
+struct ks_llm_cfg;
+/* W2 轮起手统一入口（评审 M-01/M-08 整改）：TTS hint 写入 + prompt
+ * 基座缓存与重组。基座在首次调用时从 llm->system 缓存——此后每轮恒
+ * 以"缓存基座+尾段"重建，杜绝上轮产物自引用累积。须在每轮 LLM 之前
+ * 调用一次（convo/one_round 同款单行落点）。 */
+void soul_convo_bind(struct ks_tts_cfg *tts, struct ks_llm_cfg *llm);
 /* HIL 时间压缩档开关（'d' 键；仅 debug 会话使用，产品态不开） */
 void soul_fast_drain(bool on);
 uint32_t soul_tick_count(void);

@@ -886,29 +886,8 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		ESP_LOGE(TAG, "asr open fail");
 		return -1;
 	}
-	/* W2：情感→会话（菜单轮与产品轮同一套；见 convo_fsm 同款） */
-	{
-		static char s_sys_dyn[640];
-		struct soul_snap snap;
-
-		soul_snapshot(&snap);
-		tts->speech_rate = snap.emo.tts_hint.rate;
-		tts->pitch = (int)(snap.emo.tts_hint.pitch >= 0 ?
-				   snap.emo.tts_hint.pitch + 0.5f :
-				   snap.emo.tts_hint.pitch - 0.5f);
-		kf_log("VL,SOUL,TTS,tag=%s,rate=%.2f,pitch=%d\r\n",
-		       snap.emo.anim_tag, tts->speech_rate, tts->pitch);
-		snprintf(s_sys_dyn, sizeof(s_sys_dyn), "%s%s",
-			 llm->system ? llm->system : "",
-			 soul_prompt_suffix());
-		llm->system = s_sys_dyn;
-		if (kf_dbg_get()) {
-			kf_log("VL,SOUL,PROMPT,len=%d\r\n",
-			       (int)strlen(s_sys_dyn));
-			kf_log_raw(s_sys_dyn);
-			kf_log_raw("\r\n");
-		}
-	}
+	/* W2：同 convo_fsm（评审 M-01 单行落点） */
+	soul_convo_bind(tts, llm);
 	/* V-41 解嵌套史见 clause_pump.c；此处同步开 TTS（MiniMax 的
 	 * open 仅解析 JWT，µs 级） */
 	if (pump_tts_attach(tts, on_tts_pcm) != 0)
@@ -1260,7 +1239,7 @@ void app_main(void)
 	kf_log("VL,READY,keys: g=round t=embedded a=acoustic w=wakenet "
 	       "W=wn-selftest c=hands-free n=manual-wake C=auto-soak "
 	       "M=llm-toggle k=web-config o=ap-probe u=stats s=sd p=pa "
-	       "l=loopback e=emote-cycle R=align Y=aec m/M/b/j=soul-inject (%d menu rounds) [voice-always-on V-46c]\r\n", ROUND_MAX);
+	       "l=loopback e=emote-cycle R=align Y=aec m/f/b/j=soul-inject (%d menu rounds) [voice-always-on V-46c]\r\n", ROUND_MAX);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
 		bool round_key = (ch == 'g' || ch == 'G' || ch == 't' ||
@@ -1432,12 +1411,12 @@ void app_main(void)
 			}
 			continue;
 		}
-		if (ch == 'm' || ch == 'M' || ch == 'b' || ch == 'j') {
+		if (ch == 'm' || ch == 'f' || ch == 'b' || ch == 'j') {
 			/* W0 灵魂注入器（V-48a）：无真人驱动驱力/回执闭环。
-			 * m=轮成 M=轮败 b=打断 j=人声（内部限频） */
+			 * m=轮成 f=轮败 b=打断 j=人声（内部限频） */
 			if (ch == 'm')
 				soul_on_round(true);
-			else if (ch == 'M')
+			else if (ch == 'f')
 				soul_on_round(false);
 			else if (ch == 'b')
 				soul_on_barge();
