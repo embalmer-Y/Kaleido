@@ -1,13 +1,5 @@
 dependencies:
   idf: '>=5.3'
-  ## 显示链（dsi-lvgl 口径）
-  espressif/esp_lvgl_port:
-    version: 2.7.*
-    public: true
-  lvgl/lvgl:
-    version: 9.4.*
-    public: true
-  ## 表情链：EAF 矢量格式 + mmap 闪存直读（V-45R 定向；thorvg 版见 git 历史）
   ## 语音链（voice-loop-p4 口径）
   espressif/esp_codec_dev: 1.6.2
   espressif/cjson: ^1.7
@@ -15,4 +7,5 @@ dependencies:
   # WiFi 走 C5：host 组件版本与板上预烧 slave 严格同版（26 号 §2）
   espressif/esp_hosted: 2.12.9
   espressif/esp-sr: 2.6.0
-  espressif2022/esp_emote_gen_player: ^0.0.2
+  # 显示链依赖（esp_lvgl_port/lvgl/esp_emote_gen_player/esp_lcd_jd9366）
+  # 已随表达层拆除移除——2 寸屏重做时按新屏选型重新声明（2026-10-28）

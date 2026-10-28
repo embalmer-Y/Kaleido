@@ -27,10 +27,8 @@
 
 #include "audio_io.h"
 #include "convo_fsm.h"
-#include "esp_lvgl_port.h"
 #include "kaleido_core.h"
 #include "kaleido_speech.h"
-#include "emote_stage.h"
 
 /* convo_stage_main：V-46c 打断——播放缓冲排干 + TX 中止 */
 void pb_abort_playback(void);
@@ -231,20 +229,6 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	s_selftest = selftest;
 	s_on_wake = on_wake;
 
-	/* V-45 第二阻断隔离包装：死亡点在 srmodel_init/create_from_config
-	 * 且仅显示链活着时发生。顺序严格：①先停表情动画（同步等 gfx
-	 * 任务 ack，此刻无人再碰 LVGL/PSRAM 渲染）②再持 LVGL 互斥干净
-	 * 停掉 LVGL 刷新。不得反过来（lvgl→gfx 反向嵌套会与 flush_cb
-	 * 的 gfx→lvgl 成 ABBA 死锁——锁纪律见 emote_stage.c 文件头） */
-	if (!emote_stage_pause(true)) {
-		/* 隔离降级不许静默：记日志后中止本次加载（渲染未停就跑
-		 * 模型加载=重蹈 V-45 缓存维护死锁——宁可让用户重按） */
-		kf_ev("wn", "pause_timeout");
-		kf_log("VL,WN,ERROR=emote_pause_timeout\r\n");
-		s_running = false;
-		return;
-	}
-	bool lvgl_held = lvgl_port_lock(2000);
 	kf_log("VL,WN,STAGE,srmodel_begin\r\n");
 	models = esp_srmodel_init("model");
 	kf_log("VL,WN,STAGE,srmodel_end,n=%d\r\n",
@@ -287,9 +271,6 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 		goto out_unfreeze;
 	}
 out_unfreeze:
-	if (lvgl_held)
-		lvgl_port_unlock();
-	emote_stage_pause(false);
 	if (!models || models->num == 0 || !s_afe || !s_afe_data)
 		return;
 	kf_ev("wn", "loaded int=-%uKB", (unsigned)(

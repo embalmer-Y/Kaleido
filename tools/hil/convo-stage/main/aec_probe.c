@@ -227,13 +227,6 @@ void aec_align_probe(void)
 	/* 订阅 TWDT：再卡死则 7s 后吐任务名单与寄存器现场（HP WDT 静默
 	 * 锁死的取证 substitute）——V-46b 调试利器 */
 	esp_task_wdt_add(NULL);
-	/* 表情渲染隔离：实测 gfx_render 会在此场景自旋饿死 main/IDLE0
-	 * （TWDT 寄存器现场：核0 PSRAM 热循环）。探针不需要表情同跑，
-	 * V-46c 集成时再查两活共存的病理 */
-	{
-		extern bool emote_stage_pause(bool);
-		emote_stage_pause(true);
-	}
 	for (int i = 0; i < 3; i++) {
 		offs[i] = corr_align();
 		kf_log("VL,AEC,ALIGN,rep=%d,offset=%d\r\n", i, (int)offs[i]);
@@ -241,10 +234,6 @@ void aec_align_probe(void)
 		if (offs[i] > 0)
 			n++;
 		vTaskDelay(pdMS_TO_TICKS(300));
-	}
-	{
-		extern bool emote_stage_pause(bool);
-		emote_stage_pause(false);
 	}
 	esp_task_wdt_delete(NULL);
 	if (n) {

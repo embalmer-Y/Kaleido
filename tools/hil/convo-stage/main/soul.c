@@ -19,7 +19,6 @@
 #include "freertos/task.h"
 
 #include "convo_fsm.h"
-#include "emote_stage.h"
 #include "kaleido_speech.h"
 #include "kaleido_core.h"
 #include "kaleido_secret.h"
@@ -45,10 +44,6 @@ static const struct kd_params s_fast_bench = {
 };
 #define SOUL_VOICE_MIN_MS	5000	/* VOICE 脉冲限频（28 号 §9.3 防刷） */
 #define SOUL_TELEM_QUIET_S	15	/* 常态遥测降频（debug 态逐拍） */
-#define SOUL_EMO_DWELL		8	/* 片段最短驻留（拍）——防抖动 */
-#define SOUL_ASPLEEP_TICKS	600	/* 连续安静 600 拍（拍恒 1s——
-					 * 压缩档只加速代谢不改拍频，
-					 * 故两模式同为 ~10min）→ 睡着 */
 
 static SemaphoreHandle_t s_lock;	/* 快照拷贝锁 */
 static bool s_force_think;		/* 'i' 强制（临界区外 BOOL 单写） */
@@ -204,41 +199,9 @@ void soul_snapshot(struct soul_snap *out)
 	xSemaphoreGive(s_lock);
 }
 
-static bool s_prev_idle(enum convo_state st)
-{
-	return st == CONVO_IDLE || st == CONVO_OFF;
-}
-
-/* ---- W1 表达策略：九维 → 22 段猫伴片段（仅接管 IDLE 底色） ----
- * 主判 anim_tag（valence×arousal），次判用 ethics/urgency/bond/rest/
- * 安静时长微调。映射表维护纪律：改动须同步 soul-test 与 V-48b 判分。
- * 活动四态（倾听/思考/说话）不归本策略——KEX 桥直配优先。 */
-static const char *emo_clip_pick(const struct ke_output *emo,
-				 const struct kd_output *drv,
-				 bool quiet_long)
-{
-	if (emo->state.ethics_latched)
-		return "sigh_20s_20s";		/* 闩锁=安抚低落 */
-	if (emo->state.urgency >= 0.5f && emo->state.valence <= -0.15f)
-		return "panic_05s_15";
-	if (emo->state.valence >= 0.15f)		/* happy */
-		return emo->state.arousal >= 0.55f ?
-			       (emo->state.social_bond >= 0.5f ?
-				"laugh_05s_10" : "smile_05s") :
-			       "leisure_05s_";	/* relaxed */
-	if (emo->state.valence <= -0.15f)		/* sad/angry */
-		return emo->state.arousal >= 0.55f ? "angry_20s" :
-						     "sad_05s15s";
-	if (emo->state.arousal >= 0.55f)
-		return "shocked_05s_";		/* surprised */
-	if (emo->state.arousal >= 0.30f)
-		return "question_05s";		/* confused */
-	if (drv->sev[KD_REST] >= KD_SEV_HIGH)
-		return "yawn_20s";		/* 疲态显性化 */
-	if (quiet_long)
-		return "asleep_215s";		/* 长时无人入睡 */
-	return "smile_static";			/* 平静基线 */
-}
+/* W1 表达策略（emo_clip_pick 九维→片段映射）随表情舞台一并拆除——
+ * 2026-10-28 表达层重做决议；重做时从 git（7ad270cc）取回，见
+ * docs/表达层拆除与重做-2026-10-28.md */
 
 /* ---- W2 轮起手（评审 M-01 整改：基座缓存防逐轮累积） ---- */
 void soul_convo_bind(struct ks_tts_cfg *tts, struct ks_llm_cfg *llm)
@@ -334,40 +297,6 @@ static void soul_tick(void)
 	kin.social_event = (evt == KD_EVT_ROUND_OK || evt == KD_EVT_BARGE ||
 			    evt == KD_EVT_VOICE || evt == KD_EVT_TOUCH);
 	ke_step(s_ticks, &kin, &kout);
-
-	/* W1 表达策略：IDLE/OFF 且已配置才接管底色（未配置引导/活动
-	 * 四态归 KEX 桥）；驻留 8 拍 + 活动结束首拍立即换 */
-	{
-		static enum convo_state s_prev_st;
-		static uint32_t s_last_emo_tick;
-		static uint32_t s_quiet_ticks;
-		static char s_cur_clip[24];
-		bool idle_now = (st == CONVO_IDLE || st == CONVO_OFF);
-		bool configured = s_configured;
-
-		if (!idle_now) {
-			s_quiet_ticks = 0;
-		} else if (evt != KD_EVT_NONE || rc != KE_RECEIPT_NONE) {
-			s_quiet_ticks = 0;
-		} else if (din.quiet) {
-			s_quiet_ticks++;
-		}
-		if (idle_now && configured) {
-			bool activity_ended =
-				idle_now && !s_prev_idle(s_prev_st);
-			const char *clip = emo_clip_pick(&kout, &dout,
-					s_quiet_ticks >= SOUL_ASPLEEP_TICKS);
-
-			if (clip && strcmp(clip, s_cur_clip) != 0 &&
-			    (activity_ended || s_ticks - s_last_emo_tick >=
-			     SOUL_EMO_DWELL)) {
-				strlcpy(s_cur_clip, clip, sizeof(s_cur_clip));
-				s_last_emo_tick = s_ticks;
-				emote_stage_set_emo(clip);
-			}
-		}
-		s_prev_st = st;
-	}
 
 	/* 点火打分（W0 只观测）：affect_motive 接 urgency；candidate 仅遥测 */
 	memset(&ictx, 0, sizeof(ictx));
