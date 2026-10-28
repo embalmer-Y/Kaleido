@@ -38,6 +38,10 @@ void soul_snapshot(struct soul_snap *out);
 void soul_on_round(bool ok);   /* 一轮结算（rc 落地拍；回执+驱力脉冲） */
 void soul_on_barge(void);      /* 打断成功（强在场信号）               */
 void soul_on_voice(void);      /* 人声活动拍（内部 ≥5s 限频防刷）      */
+void soul_on_mood(float delta); /* W2：LLM mood 标签→有界重评价（经
+				 * 单写者通道，下一拍经 ke_reappraisal 生效） */
+const char *soul_prompt_suffix(void); /* W2：九维→系统提示词尾段（调用
+				 * 方上下文构建，静态缓冲当轮有效）     */
 /* HIL 时间压缩档开关（'d' 键；仅 debug 会话使用，产品态不开） */
 void soul_fast_drain(bool on);
 uint32_t soul_tick_count(void);

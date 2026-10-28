@@ -10,6 +10,7 @@
  * （time_rhythm/event_hook/presence W3 供给、memory_hook W4 供给）；
  * candidate 仅遥测不上动作——主动对外动作等 W3 思维触发闸。
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_timer.h"
@@ -57,7 +58,9 @@ static uint32_t s_ticks;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static enum kd_event s_pend_evt;
 static enum ke_receipt s_pend_receipt;	/* 一轮结算一次（G1 口径） */
+static float s_pend_mood;		/* W2：待转发的有界重评价 */
 static int64_t s_last_voice_us;
+static uint32_t s_mood_seq;
 
 static void pend_push(enum kd_event evt, enum ke_receipt rc)
 {
@@ -81,6 +84,43 @@ void soul_on_round(bool ok)
 void soul_on_barge(void)
 {
 	pend_push(KD_EVT_BARGE, KE_RECEIPT_NONE);
+}
+
+void soul_on_mood(float delta)
+{
+	portENTER_CRITICAL(&s_mux);
+	s_pend_mood = delta;
+	portEXIT_CRITICAL(&s_mux);
+}
+
+/* W2：九维自然语言尾段（D-13 合规——只读注入；mood 是唯一回写通道） */
+const char *soul_prompt_suffix(void)
+{
+	static char s_prompt[640];	/* 最坏路径全串 ~470B（gcc
+					 * format-truncation 实测口径） */
+	struct soul_snap snap;
+	const struct ke_state *st;
+	const char *v, *a, *u;
+
+	soul_snapshot(&snap);
+	st = &snap.emo.state;
+	v = st->valence >= 0.15f ? "愉悦偏正" :
+	    st->valence <= -0.15f ? "低落偏负" : "平静";
+	a = st->arousal >= 0.55f ? "较高（活泼警觉）" :
+	    st->arousal >= 0.30f ? "中等" : "低（安静倦怠）";
+	u = st->urgency >= 0.5f ? "强（有想主动表达的冲动）" :
+	    st->urgency >= 0.10f ? "轻微" : "无";
+	snprintf(s_prompt, sizeof(s_prompt),
+		 "\n\n[内在状态] 你（墨墨）此刻：心情%s，活力%s，"
+		 "表达冲动%s。%s"
+		 "若这轮对话明显改变了你的心情，在回复的最末尾附加恰好"
+		 "一个 <mood d=\"+0.1\" t=\"6\"/> 标签（d 是 -0.2 到 +0.2 "
+		 "的一位小数，心情变好为正；t 是 4 到 8 的整数）；没有明显"
+		 "变化则不要附加，标签之外不要解释。",
+		 v, a, u,
+		 st->ethics_latched ?
+		 "（当前处于安抚模式：只能用温柔安抚的语气说话。）" : "");
+	return s_prompt;
 }
 
 void soul_on_voice(void)
@@ -188,6 +228,24 @@ static void soul_tick(void)
 	din.quiet = (st == CONVO_IDLE || st == CONVO_OFF);
 	din.event = evt;
 	kd_step(s_ticks, &din, &dout);
+
+	portENTER_CRITICAL(&s_mux);
+	{
+		float m = s_pend_mood;
+
+		s_pend_mood = 0.0f;
+		portEXIT_CRITICAL(&s_mux);
+		if (m != 0.0f) {
+			struct ke_reappraisal r = {
+				.delta = m,
+				.receipt_id = ++s_mood_seq,
+			};
+
+			kf_log("VL,SOUL,MOOD,seq=%u,req=%.2f,rc=%d\r\n",
+			       (unsigned)s_mood_seq, m,
+			       ke_reappraisal_request(&r));
+		}
+	}
 
 	/* 情感受态：驱力误差全供（kd 常供 ⇒ have_drive 恒真）；
 	 * novelty/uncertainty 无源（W2/W6 接入前保持，D7 位不置） */

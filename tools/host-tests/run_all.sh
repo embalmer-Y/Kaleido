@@ -21,6 +21,21 @@ run() {  # name main.c extra_src...
 run memory "$FW/tools/host-tests/km_host_test.c"
 run persona "$FW/tools/host-tests/kp_host_test.c"
 
+# mood 剥离（W2 纯函数直编）
+cat > "$TMP/mood_main.c" <<'UEOF'
+#include "unity_internals.h"
+void mood_tests_main(void);
+void setUp(void) {}
+void tearDown(void) {}
+int main(void) { mood_tests_main(); return Unity.TestFailures ? 1 : 0; }
+UEOF
+gcc -Wall -I"$FW/tools/hil/convo-stage/main" -I$UNITY/src \
+	-o "$TMP/mood" "$TMP/mood_main.c" \
+	"$FW/tools/hil/convo-stage/main/test_mood.c" \
+	"$FW/tools/hil/convo-stage/main/mood.c" \
+	"$UNITY/src/unity.c"
+"$TMP/mood"
+
 # 灵魂三件（drive/emotion/ignition）：Unity 直编（主机 main 包装
 # unity_runner）；emotion 套件含 kd→ke 全链锚，须三源同链
 cat > "$TMP/ke_main.c" <<'UEOF'

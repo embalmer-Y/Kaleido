@@ -886,6 +886,29 @@ static int one_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 		ESP_LOGE(TAG, "asr open fail");
 		return -1;
 	}
+	/* W2：情感→会话（菜单轮与产品轮同一套；见 convo_fsm 同款） */
+	{
+		static char s_sys_dyn[640];
+		struct soul_snap snap;
+
+		soul_snapshot(&snap);
+		tts->speech_rate = snap.emo.tts_hint.rate;
+		tts->pitch = (int)(snap.emo.tts_hint.pitch >= 0 ?
+				   snap.emo.tts_hint.pitch + 0.5f :
+				   snap.emo.tts_hint.pitch - 0.5f);
+		kf_log("VL,SOUL,TTS,tag=%s,rate=%.2f,pitch=%d\r\n",
+		       snap.emo.anim_tag, tts->speech_rate, tts->pitch);
+		snprintf(s_sys_dyn, sizeof(s_sys_dyn), "%s%s",
+			 llm->system ? llm->system : "",
+			 soul_prompt_suffix());
+		llm->system = s_sys_dyn;
+		if (kf_dbg_get()) {
+			kf_log("VL,SOUL,PROMPT,len=%d\r\n",
+			       (int)strlen(s_sys_dyn));
+			kf_log_raw(s_sys_dyn);
+			kf_log_raw("\r\n");
+		}
+	}
 	/* V-41 解嵌套史见 clause_pump.c；此处同步开 TTS（MiniMax 的
 	 * open 仅解析 JWT，µs 级） */
 	if (pump_tts_attach(tts, on_tts_pcm) != 0)

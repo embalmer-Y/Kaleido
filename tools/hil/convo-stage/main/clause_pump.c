@@ -17,6 +17,8 @@
 #include "freertos/task.h"
 
 #include "clause_pump.h"
+#include "mood.h"
+#include "soul.h"
 
 static const char *TAG = "pump";
 
@@ -79,6 +81,7 @@ void pump_reset(void)
 
 int pump_tts_attach(const struct ks_tts_cfg *cfg, ks_tts_pcm_cb on_pcm)
 {
+	mood_round_reset();	/* W2：每轮只取首个标签 */
 	struct ks_tts_events ev = { .on_pcm = on_pcm };
 
 	/* MiniMax 的 open 只是解析 JWT（µs 级）；DashScope 构建下此处
@@ -116,6 +119,8 @@ bool pump_stop(uint32_t timeout_ms)
 
 void pump_tts_detach(void)
 {
+	if (mood_round_end())
+		ESP_LOGW(TAG, "mood tail dropped (unclosed)");
 	ks_tts_close();
 	s_tts_open = false;
 }
@@ -125,13 +130,21 @@ bool pump_on_llm_sentence(void *user, const char *sentence, bool final)
 	(void)user;	/* TTS 由常驻 feeder 负责，回调只管入队 */
 	(void)final;	/* 流结束哨兵由 pump_stop 统一下发 */
 
+	char work[CLAUSE_ITEM_BYTES + 32];	/* +mood 尾巴余量 */
+	size_t n;
+
 	if (!s_q)
 		return true;
 	if (!s_first_clause_us && sentence[0])
 		s_first_clause_us = esp_timer_get_time();
 	if (!sentence[0])
 		return true;	/* 空子句防御 */
-	if (xQueueSend(s_q, sentence, pdMS_TO_TICKS(200)) != pdTRUE) {
+
+	/* W2：mood 剥离（跨子句缓冲在 mood 模块内） */
+	strlcpy(work, sentence, sizeof(work));
+	if (!mood_process(work, sizeof(work), strlen(work), soul_on_mood))
+		return true;	/* 整句只是标签：不喂 TTS */
+	if (xQueueSend(s_q, work, pdMS_TO_TICKS(200)) != pdTRUE) {
 		ESP_LOGW(TAG, "clause q full, drop");
 		return false;	/* 消费不动：让 LLM 流尽早停 */
 	}
