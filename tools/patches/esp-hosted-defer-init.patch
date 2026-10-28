@@ -1,0 +1,21 @@
+--- /tmp/port_esp_hosted_host_init.c.orig	2026-10-28 21:51:58.088979941 +0800
++++ managed_components/espressif__esp_hosted/host/port/esp/freertos/src/port_esp_hosted_host_init.c	2026-10-28 21:52:15.277414757 +0800
+@@ -14,10 +14,17 @@
+ DEFINE_LOG_TAG(host_init);
+ 
+ //ESP_SYSTEM_INIT_FN(esp_hosted_host_init, BIT(0), 120)
++/* KALEIDO PATCH（缺陷 H，2026-10-28）：原实现在此 constructor 中直接
++ * esp_hosted_init()——它在 app_startup.c:83 创建主任务之前启动 SDIO 与
++ * RPC 任务，其 cache/DMA 维护与主任务栈 memset 竞态（P4 共享 cache-sync
++ * 引擎，上游 espressif/esp-idf#19171 同族），宿主高负载时 ~50% 启动期
++ * Store access fault（MTVAL=合法内部堆地址）。改为应用在 app_main 任务
++ * 创建完成后显式调用 esp_hosted_init()（见 convo_stage_main.c）。
++ * 组件重装后需重放 tools/patches/esp-hosted-defer-init.patch。 */
+ static void __attribute__((constructor)) esp_hosted_host_init(void)
+ {
+ 	ESP_LOGI(TAG, "ESP Hosted : Host chip_ip[%d]", CONFIG_IDF_FIRMWARE_CHIP_ID);
+-	ESP_ERROR_CHECK(esp_hosted_init());
++	ESP_LOGI(TAG, "Kaleido: init deferred to app_main (defect H)");
+ }
+ 
+ static void __attribute__((destructor)) esp_hosted_host_deinit(void)

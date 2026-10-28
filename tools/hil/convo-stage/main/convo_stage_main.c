@@ -44,6 +44,8 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
+#include "esp_hosted.h"		/* 缺陷 H：hosted 延后显式初始化 */
+#include "diag_cfg.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
@@ -1128,6 +1130,15 @@ void app_main(void)
 
 	kf_init();		/* 框架最先：崩溃取证回放在任何业务日志前 */
 	esp_log_level_set("*", ESP_LOG_WARN);
+#if KALEIDO_DIAG_MIN
+	/* 缺陷 H 定位：极简应用（一切业务外设不初始化），见 diag_cfg.h */
+	kf_log("VL,DIAG,MIN,up,flash=%dM,psram=%dM\r\n",
+	       CONFIG_ESPTOOLPY_FLASHFREQ_VAL, CONFIG_SPIRAM_SPEED);
+	for (;;) {
+		vTaskDelay(pdMS_TO_TICKS(1000));
+		kf_log("VL,DIAG,MIN,beat\r\n");
+	}
+#endif
 	/* ws 组件日志收权（V-45 取证用临时 INFO 已常态化进 debug 模式，
 	 * 'v' 打开时全局 DEBUG 覆盖） */
 	nvs_flash_init();
@@ -1178,9 +1189,21 @@ void app_main(void)
 
 	kf_log("VL,MEM,pre-wifi,int=%uk,ps=%uk\r\n",
 	       (unsigned)(heap_caps_get_free_size(
-			  MALLOC_CAP_INTERNAL) / 1024),
+				  MALLOC_CAP_INTERNAL) / 1024),
 	       (unsigned)(heap_caps_get_free_size(
-			  MALLOC_CAP_SPIRAM) / 1024));
+				  MALLOC_CAP_SPIRAM) / 1024));
+
+	/* 缺陷 H：hosted 原以 constructor 在主任务创建前自启（managed
+	 * 组件已打补丁停用），其 SDIO/cache 维护与启动期任务栈 memset
+	 * 竞态（#19171 族，高负载宿主 ~50% 启动崩溃）。此处所有常驻
+	 * 任务已创建完毕、wifi 尚未启动，是首个安全初始化点。 */
+	{
+		int64_t t0 = esp_timer_get_time();
+
+		ESP_ERROR_CHECK(esp_hosted_init());
+		kf_log("VL,HOSTED,init,%ums\r\n",
+		       (unsigned)((esp_timer_get_time() - t0) / 1000));
+	}
 
 	if (oobe_ap) {
 		if (provision_ap_start() != 0) {
