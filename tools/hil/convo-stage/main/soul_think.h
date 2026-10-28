@@ -38,5 +38,7 @@ bool soul_think_busy(void);
 struct ki_intent;
 /* HIL 假意图直注（'h' 键）：跳深思 LLM，出口/执行/结算同一套 */
 bool soul_think_inject(const struct ki_intent *intent);
+/* HIL 坏 JSON 直注（'H'）：跳深思 LLM，parse 拒绝原路径（判据②板端） */
+bool soul_think_inject_json(const char *js);
 
 #endif /* SOUL_THINK_H */

@@ -1237,6 +1237,16 @@ void app_main(void)
 				kf_log("VL,KI,INJECT,busy\r\n");
 			continue;
 		}
+		if (ch == 'H') {
+			/* W3 判据②板端：坏 JSON → parse 拒绝 → 沉默，
+			 * 不出声不 panic（'h' 小写=合法意图直注） */
+			if (soul_think_inject_json(
+				    "{act: 0.8, broken!!!"))
+				kf_log("VL,KI,INJECT,badjson\r\n");
+			else
+				kf_log("VL,KI,INJECT,busy\r\n");
+			continue;
+		}
 		if (ch == 'i') {
 			/* W3 强制思维（HIL：跳触发闸；门/结算照常） */
 			soul_force_think();

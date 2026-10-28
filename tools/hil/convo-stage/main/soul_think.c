@@ -51,6 +51,8 @@ static bool s_forced;
 static float s_trig_score;              /* 触发时 ki_step 分（新意门基准） */
 static bool s_inject;                   /* HIL：假意图直注（跳深思 LLM） */
 static struct ki_intent s_inject_intent;
+static bool s_inj_json_mode;            /* HIL：坏 JSON 直注（走 parse 拒绝原路径，'H'） */
+static char s_inj_json[160];
 
 static uint32_t s_last_think_min;
 static uint8_t s_thought_today;
@@ -221,6 +223,11 @@ static void think_task(void *arg)
 		intent = s_inject_intent;       /* HIL 假意图：跳深思 */
 		goto executed;
 	}
+	if (s_inj_json_mode) {
+		/* HIL 坏 JSON：跳 LLM，parse 拒绝路径与自然轮同一套 */
+		strlcpy(reply, s_inj_json, sizeof(reply));
+		goto parsed;
+	}
 	think_prompt(prompt, sizeof(prompt));
 	kf_log("VL,KI,THINK,reason=%u,forced=%d,score=%.2f\r\n",
 	       s_reason, forced, s_trig_score);
@@ -240,6 +247,7 @@ static void think_task(void *arg)
 	if (kf_dbg_get())
 		kf_log("VL,KI,RAW,%.120s\r\n", reply);
 
+parsed:
 	pe = ki_intent_parse(reply, strlen(reply), &intent);
 	if (pe != KI_PARSE_OK && pe != KI_PARSE_CONTENT_LONG) {
 		char d[48];
@@ -345,6 +353,7 @@ executed:
 
 out:
 	s_inject = false;
+	s_inj_json_mode = false;
 	s_thought_today++;
 	s_last_think_min = now;
 	s_new_event = false;
@@ -362,6 +371,21 @@ bool soul_think_inject(const struct ki_intent *intent)
 	s_inject = true;
 	s_reason = 0;
 	s_forced = true;
+	s_trig_score = 0.0f;
+	s_busy = true;
+	xTaskNotifyGive(s_handle);
+	return true;
+}
+
+/* HIL 坏 JSON 直注（'H' 键）：parse 拒绝路径板上演练用 */
+bool soul_think_inject_json(const char *js)
+{
+	if (s_busy || !s_handle || !js || !js[0])
+		return false;
+	strlcpy(s_inj_json, js, sizeof(s_inj_json));
+	s_inj_json_mode = true;
+	s_forced = false;
+	s_reason = 0;
 	s_trig_score = 0.0f;
 	s_busy = true;
 	xTaskNotifyGive(s_handle);

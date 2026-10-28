@@ -218,9 +218,12 @@ void soul_convo_bind(struct ks_tts_cfg *tts, struct ks_llm_cfg *llm)
 	static char s_sys_dyn[2432];
 	static const char *s_base;	/* 首轮缓存的人格基座 */
 
-	if (!s_base)
+	if (llm && !s_base)
 		s_base = llm->system;	/* 首轮原样（此后 llm->system 指
-					 * s_sys_dyn，不可再作基座源） */
+					 * s_sys_dyn，不可再作基座源）。
+					 * llm 可为 NULL（think SPEAK 路径
+					 * 只取 TTS hint）——NULL 解引用曾
+					 * 以"缺陷 H"名义挡住 V-48d ②③ */
 	if (tts) {
 		struct soul_snap snap;
 
