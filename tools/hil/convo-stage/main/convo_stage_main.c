@@ -1094,6 +1094,7 @@ static void wake_handler(void)
 			kf_log("VL,CONVO,AUTOSTART");
 	}
 	convo_notify_wake();
+	soul_on_voice();	/* W1：唤醒词命中=强在场（limb 内限频） */
 }
 
 void app_main(void)

@@ -76,11 +76,14 @@ static const struct {
 static void resize_after_switch(void);
 
 /* ---- 消息（全部经队列进 emote 任务执行） ---- */
-enum msg_type { MSG_STATE, MSG_CYCLE, MSG_PAUSE, MSG_RESUME };
+enum msg_type { MSG_STATE, MSG_CYCLE, MSG_PAUSE, MSG_RESUME, MSG_EMO };
+
+#define MSG_CLIP_MAX	24
 
 struct msg {
 	enum msg_type type;
 	enum kex_state st;
+	char clip[MSG_CLIP_MAX];	/* MSG_EMO：soul 策略选定的片段名 */
 };
 
 static void emote_task(void *arg)
@@ -112,6 +115,17 @@ static void emote_task(void *arg)
 				resize_after_switch();
 				break;
 			}
+			break;
+		case MSG_EMO:
+			if (paused)
+				break;
+			if (emote_gen_player_anim_fade_name(s_player,
+					m.clip, true) == ESP_ERR_NOT_FOUND)
+				emote_gen_player_anim_fade_name(s_player,
+							"smile_05s", true);
+			kf_log("VL,EMOTE,CLIP,emo=%s\r\n", m.clip);
+			kf_ev("emote", "emo=%s", m.clip);
+			resize_after_switch();
 			break;
 		case MSG_CYCLE: {
 			/* 人工目验：顺序轮播全部片段 */
@@ -272,6 +286,16 @@ void emote_stage_set_state(enum kex_state st)
 
 	if (s_q)
 		xQueueSend(s_q, &m, 0);
+}
+
+void emote_stage_set_emo(const char *clip)
+{
+	struct msg m = { .type = MSG_EMO, .st = 0 };
+
+	if (!s_q || !clip || !clip[0])
+		return;
+	strlcpy(m.clip, clip, sizeof(m.clip));
+	xQueueSend(s_q, &m, 0);
 }
 
 void emote_stage_cycle(void)

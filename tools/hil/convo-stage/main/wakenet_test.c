@@ -18,6 +18,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "soul.h"
+
 #include "esp_afe_config.h"
 #include "esp_afe_sr_iface.h"
 #include "esp_afe_sr_models.h"
@@ -145,6 +147,7 @@ static void detect_task(void *arg)
 			kf_log("VL,WN,BARGE,cnt=%d,vol=%.1f\r\n",
 			       s_wake_cnt, r->data_volume);
 			kf_ev("wn", "barge-in");
+			soul_on_barge();	/* W1：强在场信号 */
 			if (s_on_wake)
 				s_on_wake();
 			continue;	/* 打断即听，不鸣笛抢话 */

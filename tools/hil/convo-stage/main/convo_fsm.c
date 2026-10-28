@@ -28,6 +28,7 @@
 
 #include "audio_io.h"
 #include "clause_pump.h"
+#include "soul.h"
 #include "kaleido_core.h"
 #include "convo_fsm.h"
 
@@ -294,6 +295,7 @@ static void convo_task(void *arg)
 			       (unsigned)(heap_caps_get_free_size(
 					  MALLOC_CAP_SPIRAM) / 1024));
 	kf_ev("convo", "round rc=%d ms=%lld", rc, el / 1000);
+	soul_on_round(rc == 0);		/* W1：一轮一回执+驱力脉冲 */
 		}
 		s_state = CONVO_IDLE;
 	}

@@ -11,6 +11,10 @@ int emote_stage_start(void);
 /* KEX 状态 → 表情片段（异步：内部入队，LVGL 回调上下文安全调用） */
 void emote_stage_set_state(enum kex_state st);
 
+/* 情感片段（W1：soul 表达策略驱动，IDLE 底色；活动四态仍走
+ * set_state 直配——策略侧保证驻留与迟回，本接口只管切） */
+void emote_stage_set_emo(const char *clip);
+
 /* 'e' 键：循环播放下一个片段（人工目验用） */
 void emote_stage_cycle(void);
 
