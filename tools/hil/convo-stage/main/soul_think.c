@@ -66,6 +66,11 @@ static TaskHandle_t s_handle;           /* 常驻 think 任务（init 创建、
 					 * tick 里现场 xTaskCreate 16KB，
 					 * 曾与 wakenet AFE 大块分配窗口
 					 * 相撞致早期 Store fault） */
+/* 静态内部栈（缺陷 I 整改）：CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+ * 下动态栈在 AFE 吃满内部内存后会落 PSRAM → TLS 关 cache 窗口即 fault
+ * （板级纪律：碰 TLS/flash 的任务栈必须内部 RAM，编译期保留） */
+static StackType_t s_thk_stack[THINK_STACK / sizeof(StackType_t)];
+static StaticTask_t s_thk_tcb;
 
 static uint32_t uptime_min(void)
 {
@@ -78,12 +83,12 @@ void soul_think_init(struct ks_tts_cfg *tts, struct ks_llm_cfg *llm)
 {
 	s_tts = tts;
 	s_llm = llm;
-	if (xTaskCreate(think_task, "think",
-			THINK_STACK / sizeof(StackType_t), NULL,
-			THINK_PRIO, &s_handle) == pdPASS)
-		vTaskSuspend(s_handle);         /* 待命：start 时恢复 */
-	else
-		kf_log("VL,KI,FAIL,task\r\n");
+	s_handle = xTaskCreateStatic(think_task, "think",
+				     THINK_STACK / sizeof(StackType_t),
+				     NULL, THINK_PRIO, s_thk_stack,
+				     &s_thk_tcb);
+	if (!s_handle)
+		kf_log("VL,KI,FAIL,task\r\n");    /* 任务自阻塞于 notify */
 }
 
 void soul_think_gate_ctx(struct ki_think_ctx *tc)
@@ -197,6 +202,10 @@ static void think_task(void *arg)
 
 	(void)arg;
 	for (;;) {
+	/* 通知门控：任务创建后阻塞于此——启动参数（s_inject 等）在唤醒
+	 * 前已就绪。修复：创建即抢跑（prio 高于 app_main）曾致首跑直入
+	 * LLM 路径又被挂起在 TLS 中间，僵尸会话污染后续 resume。 */
+	ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 	struct ks_llm_cfg dl;
 	struct soul_snap snap;
 	struct ki_intent intent;
@@ -341,8 +350,7 @@ out:
 	s_new_event = false;
 	s_barge_hit = false;
 	s_busy = false;
-	vTaskSuspend(NULL);     /* 常驻待命：下次 start 恢复 */
-	}
+	}       /* 回到 notify 门控待命 */
 }
 
 /* HIL 假意图直注：跳深思 LLM，出口门/执行/结算同一套（'h' 键） */
@@ -356,7 +364,7 @@ bool soul_think_inject(const struct ki_intent *intent)
 	s_forced = true;
 	s_trig_score = 0.0f;
 	s_busy = true;
-	vTaskResume(s_handle);
+	xTaskNotifyGive(s_handle);
 	return true;
 }
 
@@ -368,6 +376,6 @@ bool soul_think_start(uint8_t reason_mask, bool forced, float score)
 	s_forced = forced;
 	s_trig_score = score;
 	s_busy = true;
-	vTaskResume(s_handle);
+	xTaskNotifyGive(s_handle);
 	return true;
 }
