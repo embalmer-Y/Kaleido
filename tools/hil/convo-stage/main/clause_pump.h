@@ -40,5 +40,7 @@ bool pump_on_llm_sentence(void *user, const char *sentence, bool final);
 
 /* 本轮首个子句到达时刻（µs；未有为 0）——遥测用 */
 int64_t pump_first_clause_us(void);
+/* 首子句文本（W4 记忆 facts[0]；pump_reset 后为空串） */
+void pump_first_clause(char *out, size_t n);
 
 #endif /* VOICE_LOOP_P4_CLAUSE_PUMP_H */

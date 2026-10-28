@@ -1,5 +1,8 @@
-/* host 回归：append→query(tag/keyword/time)→backup→seq 重载 */
+/* host 回归：append→query(tag/keyword/time)→backup→seq 重载
+ * W4 v2 增补：schema 往返（affect/origin）/reinforce 上界/惰性衰减/
+ * tombstone 遗忘/覆盖表持久化/容量拒写（30 号 §8.1，V-48e 主机侧） */
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -20,6 +23,9 @@ int main(void)
 	assert(mkdir("/tmp/v33/kmtest", 0755) == 0 || errno == EEXIST);
 	unlink("/tmp/v33/kmtest/ep.jsonl");
 	unlink("/tmp/v33/kmtest/core.json");
+	unlink("/tmp/v33/kmtest/ep.jsonl.ovl");
+	unlink("/tmp/v33/kmtest/ep.jsonl.tmb");
+	unlink("/tmp/v33/kmtest/backup.jsonl");
 	assert(km_init("/tmp/v33/kmtest/ep.jsonl",
 		       "/tmp/v33/kmtest/core.json") == 0);
 	assert(km_seq_current() == 0);
@@ -79,8 +85,96 @@ int main(void)
 		       "/tmp/v33/kmtest/core.json") == 0);
 	assert(km_seq_current() == 3);
 
+	strlcpy(e.summary, "聊到了周末加班的事", sizeof(e.summary));
 	strlcpy(e.tags[0], "misc", sizeof(e.tags[0]));
+	e.facts[0][0] = '\0';		/* 卫生：复用结构体须清残留 */
 	assert(km_append(&e) == 4);
+
+	/* ── W4 v2：schema 往返（affect/origin）── */
+	strlcpy(e.summary, "我主动说了今晚降温记得添衣", sizeof(e.summary));
+	e.origin = KM_ORIGIN_SELF;
+	e.affect_v = -64;		/* -0.5 */
+	e.affect_a = 96;		/* 0.75 */
+	strlcpy(e.tags[0], "evening", sizeof(e.tags[0]));
+	assert(km_append(&e) == 5);
+	assert(km_init("/tmp/v33/kmtest/ep.jsonl",
+		       "/tmp/v33/kmtest/core.json") == 0);
+	n = km_query(&(struct km_query){ .tag = "evening" }, hits,
+		     KM_QUERY_TOP);
+	assert(n == 1 && hits[0].ep.seq == 5);
+	assert(hits[0].ep.origin == KM_ORIGIN_SELF);
+	assert(hits[0].ep.affect_v == -64 && hits[0].ep.affect_a == 96);
+
+	/* origin 非法值兜底 = USER */
+	e.origin = 0;
+	strlcpy(e.tags[0], "oddlane", sizeof(e.tags[0]));
+	strlcpy(e.summary, "兜底行", sizeof(e.summary));
+	assert(km_append(&e) == 6);
+	assert(km_init("/tmp/v33/kmtest/ep.jsonl",
+		       "/tmp/v33/kmtest/core.json") == 0);
+	n = km_query(&(struct km_query){ .tag = "oddlane" }, hits,
+		     KM_QUERY_TOP);
+	assert(n == 1 && hits[0].ep.origin == KM_ORIGIN_USER);
+
+	/* ── reinforce：+0.125 步进、1.0 上界 ── */
+	float s = km_reinforce(1);
+
+	assert(fabsf(s - 0.625f) < 1e-4f);
+	for (int i = 0; i < 10; i++)
+		s = km_reinforce(1);
+	assert(fabsf(s - 1.0f) < 1e-4f);	/* 上界钳位 */
+
+	/* ── 惰性衰减：0.99/天，last_accessed 起算 ── */
+	struct km_episode probe = { .seq = 1, .t = time(NULL) };
+	time_t now = time(NULL);
+
+	assert(fabsf(km_effective_strength(&probe, now) - 1.0f) < 1e-4f);
+	float decayed = km_effective_strength(&probe, now + 69 * 86400);
+
+	/* 69 天 ≈ 0.99^69 ≈ 0.5005（半衰量级，30 号 §8.1 API-2） */
+	assert(decayed > 0.48f && decayed < 0.52f);
+	/* 未 reinforce 的 seq：初值 0.5，按 row.t 衰减 */
+	struct km_episode probe2 = { .seq = 2, .t = now };
+
+	assert(fabsf(km_effective_strength(&probe2, now) - 0.5f) < 1e-4f);
+
+	/* ── 覆盖表持久化：km_housekeeping 落 .ovl，重 init 重建 ── */
+	km_housekeeping();		/* 板上由 recorder 1Hz 驱动      */
+	assert(km_init("/tmp/v33/kmtest/ep.jsonl",
+		       "/tmp/v33/kmtest/core.json") == 0);
+	assert(fabsf(km_effective_strength(&probe, time(NULL)) - 1.0f)
+	       < 1e-4f);
+
+	/* ── tombstone 遗忘：排除检索、主行保留、幂等、不存在拒 ── */
+	assert(km_forget(3, "host_test") == 0);
+	assert(km_forget(3, "again") == 0);	/* 幂等           */
+	assert(km_forget(999, "nope") == KM_PROTECTED);
+	n = km_query(&(struct km_query){ .keyword = "咖啡" }, hits,
+		     KM_QUERY_TOP);
+	assert(n == 0);			/* 检索默认排除           */
+	assert(km_count() == 6);	/* 主行不删               */
+	f = fopen("/tmp/v33/kmtest/ep.jsonl", "r");
+	lines = 0;
+	while (fgets(line, sizeof(line), f))
+		lines++;
+	fclose(f);
+	assert(lines == 6);
+	/* 重载后墓碑仍生效（.tmb 重建） */
+	assert(km_init("/tmp/v33/kmtest/ep.jsonl",
+		       "/tmp/v33/kmtest/core.json") == 0);
+	n = km_query(&(struct km_query){ .keyword = "咖啡" }, hits,
+		     KM_QUERY_TOP);
+	assert(n == 0);
+
+	/* ── 容量：满即停写（KM_FULL），上限可调 ── */
+	km_set_cap(6);
+	strlcpy(e.summary, "容量满拒写", sizeof(e.summary));
+	strlcpy(e.tags[0], "cap", sizeof(e.tags[0]));
+	assert(km_append(&e) == KM_FULL);
+	km_set_cap(7);
+	assert(km_append(&e) == 7);
+	assert(km_count() == 7);
+
 	printf("KM_HOST_TEST,PASS,seq=%llu\n",
 	       (unsigned long long)km_seq_current());
 	return 0;

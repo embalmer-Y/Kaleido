@@ -7,5 +7,8 @@ dependencies:
   # WiFi 走 C5：host 组件版本与板上预烧 slave 严格同版（26 号 §2）
   espressif/esp_hosted: 2.12.9
   espressif/esp-sr: 2.6.0
+  ## W4 记忆：episodic JSONL 持久层（storage 分区 0x83，960KB）
+  ## 名称注意：registry 上是 joltwallet/littlefs（无 espressif/esp_littlefs）
+  joltwallet/littlefs: ^1.23
   # 显示链依赖（esp_lvgl_port/lvgl/esp_emote_gen_player/esp_lcd_jd9366）
   # 已随表达层拆除移除——2 寸屏重做时按新屏选型重新声明（2026-10-28）

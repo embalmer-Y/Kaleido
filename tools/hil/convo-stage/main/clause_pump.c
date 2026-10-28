@@ -26,6 +26,7 @@ static QueueHandle_t s_q;
 static SemaphoreHandle_t s_done;
 static volatile bool s_tts_open;
 static volatile int64_t s_first_clause_us;
+static char s_first_clause[96];		/* W4：首子句文本（记忆 facts[0]） */
 
 static void feeder_task(void *arg)
 {
@@ -77,6 +78,7 @@ void pump_reset(void)
 	xQueueReset(s_q);
 	xSemaphoreTake(s_done, 0);
 	s_first_clause_us = 0;
+	s_first_clause[0] = '\0';
 }
 
 int pump_tts_attach(const struct ks_tts_cfg *cfg, ks_tts_pcm_cb on_pcm)
@@ -135,8 +137,10 @@ bool pump_on_llm_sentence(void *user, const char *sentence, bool final)
 
 	if (!s_q)
 		return true;
-	if (!s_first_clause_us && sentence[0])
+	if (!s_first_clause_us && sentence[0]) {
 		s_first_clause_us = esp_timer_get_time();
+		strlcpy(s_first_clause, sentence, sizeof(s_first_clause));
+	}
 	if (!sentence[0])
 		return true;	/* 空子句防御 */
 
@@ -154,4 +158,9 @@ bool pump_on_llm_sentence(void *user, const char *sentence, bool final)
 int64_t pump_first_clause_us(void)
 {
 	return s_first_clause_us;
+}
+
+void pump_first_clause(char *out, size_t n)
+{
+	strlcpy(out, s_first_clause, n);
 }

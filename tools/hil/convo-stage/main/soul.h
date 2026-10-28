@@ -43,6 +43,11 @@ void soul_on_mood(float delta); /* W2：LLM mood 标签→有界重评价（经
 const char *soul_prompt_suffix(void); /* W2：九维→系统提示词尾段（调用
 				 * 方上下文构建，静态缓冲当轮有效）     */
 
+/* W4：轮级 prompt 扩展块注册（main 把 mem_prompt_block 挂进来；
+ * NULL=注销。soul 不反向依赖 mem——依赖倒置，保证 soul 可独立测） */
+typedef const char *(*soul_prompt_ext_fn)(void);
+void soul_prompt_ext_set(soul_prompt_ext_fn fn);
+
 struct ks_tts_cfg;
 struct ks_llm_cfg;
 /* W2 轮起手统一入口（评审 M-01/M-08 整改）：TTS hint 写入 + prompt

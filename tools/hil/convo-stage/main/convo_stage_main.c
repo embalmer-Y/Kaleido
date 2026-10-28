@@ -48,6 +48,7 @@
 #include "aec_probe.h"
 #include "soul.h"
 #include "soul_think.h"
+#include "mem.h"
 
 #define CAP_SECONDS	30 /* 负责人要求：真人轮 30s 窗防错过（'t' 内置轮不受影响）*/
 
@@ -539,6 +540,7 @@ static void acoustic_round(struct ks_asr_cfg *asr, struct ks_tts_cfg *tts,
 	       t_tts_first_pcm ? (t_tts_first_pcm - t_capture_end) / 1000 : -1,
 	       t_first_audio ? (t_first_audio - t_capture_end) / 1000 : -1,
 	       t_first_audio ? (t_first_audio - t_capture_end) / 1000 : -1);
+	mem_round_record(s_asr_text, rc, KM_ORIGIN_USER);/* W4 情节写回 */
 out:
 	free(cap);
 }
@@ -819,6 +821,7 @@ out:
 	if (!pump_stop(15000))
 		ESP_LOGW(TAG, "pump cleanup timeout");
 	pump_tts_detach();
+	mem_round_record(s_asr_text, rc, KM_ORIGIN_USER);/* W4 情节写回 */
 	return rc;
 }
 
@@ -983,10 +986,13 @@ void app_main(void)
 		return;
 	}
 	/* 初始化次序：①aio 最先（I2S DMA 描述符需连续内部块）；
-	 * ②wifi 最后（wakenet 必须更后，在 'w'/'c' 时）。
-	 * （显示链已整体拆除——2026-10-28 表达层重做决议：现有动画/界面
-	 *   推倒，2 寸屏到位后自 dsi-lvgl 工程重新接线，见
-	 *   docs/表达层拆除与重做-2026-10-28.md）*/
+	 * ②storage 挂载+记忆库（W4）；③wifi 最后（wakenet 必须更后，
+	 * 在 'w'/'c' 时）。（显示链已整体拆除——2026-10-28 表达层重做
+	 * 决议：现有动画/界面推倒，2 寸屏到位后自 dsi-lvgl 工程重新
+	 * 接线，见 docs/表达层拆除与重做-2026-10-28.md）*/
+	if (mem_boot() != 0)
+		ESP_LOGE(TAG, "mem boot fail（记忆降级，主流程继续）");
+	soul_prompt_ext_set(mem_prompt_block);/* W4：记忆块注入 prompt */
 
 	kf_log("VL,MEM,pre-wifi,int=%uk,ps=%uk\r\n",
 	       (unsigned)(heap_caps_get_free_size(
@@ -1013,6 +1019,7 @@ void app_main(void)
 		}
 	} else {
 		wifi_start(s_wifi_ssid, s_wifi_pass);
+		mem_net_up();		/* W4：SNTP 对时（记忆时间戳） */
 	}
 
 	/* MiniMax 优先（URL 内嵌 GroupID，由组件解析 JWT 拼好）；
@@ -1069,6 +1076,14 @@ void app_main(void)
 	       "l=loopback R=align Y=aec m/f/b/j=soul-inject i=think (%d menu rounds) [voice-always-on V-46c]\r\n", ROUND_MAX);
 	while (s_round < ROUND_MAX) {
 		int ch = getchar();
+
+		if (ch < 0) {
+			/* 缺陷 J：stdin EOF（无输入/驱动瞬态）立即返回时
+			 * 本循环变 80% 忙旋饿死 IDLE0（TWDT 每 7s 告警，
+			 * 实测 main 占 80% runtime）。EOF=无键，让出 CPU */
+			vTaskDelay(pdMS_TO_TICKS(50));
+			continue;
+		}
 		bool round_key = (ch == 'g' || ch == 'G' || ch == 't' ||
 				  ch == 'T');
 
@@ -1275,6 +1290,15 @@ void app_main(void)
 			vTaskGetRunTimeStats(stats);
 			kf_log_raw(stats);
 			kf_health_dump();	/* KF：心跳+事件环尾 */
+			mem_stats();		/* W4：记忆水位巡检 */
+			continue;
+		}
+		if (ch == 'I') {
+			/* V-48e 板端证据：canned 情节注入（重启前写→
+			 * 重启后 'g' 轮 PROMPT/RECALL 验证召回）。
+			 * 键位注意：'k'/'K' 已被 web-config 占用 */
+			kf_log("KM,INJECT,seq=%lld\r\n",
+			       (long long)mem_test_inject());
 			continue;
 		}
 		if (ch == 'W') {

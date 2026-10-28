@@ -204,9 +204,18 @@ void soul_snapshot(struct soul_snap *out)
  * docs/表达层拆除与重做-2026-10-28.md */
 
 /* ---- W2 轮起手（评审 M-01 整改：基座缓存防逐轮累积） ---- */
+static soul_prompt_ext_fn s_prompt_ext;	/* W4：记忆块提供者（DI） */
+
+void soul_prompt_ext_set(soul_prompt_ext_fn fn)
+{
+	s_prompt_ext = fn;		/* 启动期一次性注册，无并发 */
+}
+
 void soul_convo_bind(struct ks_tts_cfg *tts, struct ks_llm_cfg *llm)
 {
-	static char s_sys_dyn[640];	/* 当轮有效；单轮单任务串行 */
+	/* 2432：基座+W2 尾段+记忆块（30 号 §8.3 预算 ≤400 汉字）
+	 * 静态内部 RAM；当轮有效；单轮单任务串行 */
+	static char s_sys_dyn[2432];
 	static const char *s_base;	/* 首轮缓存的人格基座 */
 
 	if (!s_base)
@@ -224,8 +233,9 @@ void soul_convo_bind(struct ks_tts_cfg *tts, struct ks_llm_cfg *llm)
 		       snap.emo.anim_tag, tts->speech_rate, tts->pitch);
 	}
 	if (llm) {
-		snprintf(s_sys_dyn, sizeof(s_sys_dyn), "%s%s",
-			 s_base ? s_base : "", soul_prompt_suffix());
+		snprintf(s_sys_dyn, sizeof(s_sys_dyn), "%s%s%s",
+			 s_base ? s_base : "", soul_prompt_suffix(),
+			 s_prompt_ext ? s_prompt_ext() : "");
 		llm->system = s_sys_dyn;
 		if (kf_dbg_get()) {
 			kf_log("VL,SOUL,PROMPT,len=%d\r\n",

@@ -31,6 +31,7 @@
 #include "soul.h"
 #include "kaleido_core.h"
 #include "convo_fsm.h"
+#include "mem.h"
 
 /* voice_loop_main 的播放通路（单一写者原则下的跨模块挂点） */
 extern void on_tts_pcm(void *user, const uint8_t *pcm, size_t len);
@@ -298,6 +299,7 @@ static void convo_task(void *arg)
 					  MALLOC_CAP_SPIRAM) / 1024));
 	kf_ev("convo", "round rc=%d ms=%lld", rc, el / 1000);
 	soul_on_round(rc == 0);		/* W1：一轮一回执+驱力脉冲 */
+	mem_round_record(s_full, rc, KM_ORIGIN_USER);	/* W4 情节写回 */
 		}
 		s_state = CONVO_IDLE;
 	}
