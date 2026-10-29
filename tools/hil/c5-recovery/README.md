@@ -17,12 +17,17 @@ docs/hosted3-升级与C5恢复-2026-10-29.md。
 
 ## 本目录产物（esp-hosted-mcu v3.0.10 cp，IDF v5.5.4 构建=官方 CI 同版）
 
-| 文件 | 烧写偏移 | 说明 |
+> ⚠️ 历史教训：首版打包时误装了 v6.1 构建产物（构建目录未清空），
+> 已全量替换为 v5.5.4 版并加 -v554 后缀防呆（md5: app=1d5774e3a06c…）。
+> 另：v5.5.4 需先 `eh.py patch-idf`（SDIO 4092B 发送上限补丁，
+> 官方 install.sh 自带步骤）——已在 ~/esp/esp-idf-5.5.4 打好。
+
+| 文件（-v554 后缀=IDF v5.5.4 构建，防呆命名） | 烧写偏移 | 说明 |
 |---|---|---|
-| bootloader.bin | 0x2000 | |
-| partition-table.bin | 0x8000 | ota_0/ota_1 双槽 4MB 布局 |
-| ota_data_initial.bin | 0xd000 | |
-| eh_cp_wifi_sta.bin | 0x10000 | 3.0.10 slave app（1.15MB） |
+| bootloader-v554.bin | 0x2000 | |
+| partition-table-v554.bin | 0x8000 | ota_0/ota_1 双槽 4MB 布局 |
+| ota_data-v554.bin | 0xd000 | |
+| eh_cp_wifi_sta-v554.bin | 0x10000 | 3.0.10 slave app（1.12MB） |
 
 flash 参数：dio / 80m / 4MB（见 flash_args）。
 
@@ -41,8 +46,8 @@ python -m esptool --port /dev/ttyACM1 --baud 460800 \
 python -m esptool --chip esp32c5 --port /dev/ttyACM1 -b 460800 \
     --before default-reset --after hard-reset --no-stub \
     write-flash --flash-mode dio --flash-freq 80m --flash-size 4MB \
-    0x2000 bootloader.bin 0x8000 partition-table.bin \
-    0xd000 ota_data_initial.bin 0x10000 eh_cp_wifi_sta.bin
+    0x2000 bootloader-v554.bin 0x8000 partition-table-v554.bin \
+    0xd000 ota_data-v554.bin 0x10000 eh_cp_wifi_sta-v554.bin
 # 3) 开关切回 P4 → P4 复位 → 看串口：
 #    eh_init_evt: fw versions: host=3.0.10 coprocessor=3.0.10 (match)
 #    → wifi → READY → 全测试链（soak/复位采样/128B 行实验）
