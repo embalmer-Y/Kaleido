@@ -1001,15 +1001,19 @@ void app_main(void)
 	       (unsigned)(heap_caps_get_free_size(
 				  MALLOC_CAP_SPIRAM) / 1024));
 
-	/* 缺陷 H：hosted 原以 constructor 在主任务创建前自启（managed
-	 * 组件已打补丁停用），其 SDIO/cache 维护与启动期任务栈 memset
-	 * 竞态（#19171 族，高负载宿主 ~50% 启动崩溃）。此处所有常驻
-	 * 任务已创建完毕、wifi 尚未启动，是首个安全初始化点。 */
+	/* 缺陷 H 终局（hosted 3.0.10）：2.x 曾以 constructor 在主任务
+	 * 创建前自启（本地补丁停用）；3.x 官方开关
+	 * AUTO_CALL_INIT_BEFORE_APP_MAIN=n 关掉早启（3.x 源码仍是
+	 * constructor 建 prio23 任务抢跑，机理未变），改由这里显式
+	 * 两段式：init（注册 feature）→ connect_to_slave（SDIO 枚举+
+	 * C5 复位+RPC 建链，阻塞 ~1.5s）。此处所有常驻任务已创建、
+	 * wifi 尚未启动，是首个安全初始化点。 */
 	{
 		int64_t t0 = esp_timer_get_time();
 
 		ESP_ERROR_CHECK(esp_hosted_init());
-		kf_log("VL,HOSTED,init,%ums\r\n",
+		ESP_ERROR_CHECK(esp_hosted_connect_to_slave());
+		kf_log("VL,HOSTED,init+link,%ums\r\n",
 		       (unsigned)((esp_timer_get_time() - t0) / 1000));
 	}
 
