@@ -75,4 +75,19 @@ gcc -Wall -I"$FW/components/kaleido_drive/include" \
 	"$UNITY/src/unity.c" -lm
 "$TMP/soul"
 
+# 表达 v2 内核（kex_face）：Unity 直编（映射锚/插值/眨眼/瞬态/doze/包络）
+cat > "$TMP/kexp_main.c" <<'UEOF'
+#include "unity_internals.h"
+void kexp_tests_main(void);
+void setUp(void) {}
+void tearDown(void) {}
+int main(void) { kexp_tests_main(); return Unity.TestFailures ? 1 : 0; }
+UEOF
+gcc -Wall -I"$FW/components/kaleido_express/include" -I$UNITY/src \
+	-o "$TMP/kexp" "$TMP/kexp_main.c" \
+	"$FW/components/kaleido_express/test/test_kex_face.c" \
+	"$FW/components/kaleido_express/src/kex_face.c" \
+	"$UNITY/src/unity.c" -lm
+"$TMP/kexp"
+
 echo "HOST_REGRESSION_ALL_PASS"
