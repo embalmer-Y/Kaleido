@@ -651,7 +651,12 @@ static void wifi_start(const char *ssid, const char *pass)
 
 	/* 返回 netif 指针（非 esp_err_t，勿包 ESP_ERROR_CHECK） */
 	esp_netif_create_default_wifi_sta();
-	ESP_ERROR_CHECK(esp_wifi_init(&w));
+	/* C5 链路失败时降级运行（音频/表达/记忆照跑，网络功能缺席；
+	 * ESP_ERROR_CHECK 在此会把板子打进 abort 循环） */
+	if (esp_wifi_init(&w) != ESP_OK) {
+		kf_log("VL,WIFI,FAIL,init,degraded\r\n");
+		return;
+	}
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 	strlcpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
 	strlcpy((char *)wc.sta.password, pass,
@@ -1012,7 +1017,14 @@ void app_main(void)
 		int64_t t0 = esp_timer_get_time();
 
 		ESP_ERROR_CHECK(esp_hosted_init());
-		ESP_ERROR_CHECK(esp_hosted_connect_to_slave());
+		/* C5 链路失败不 abort 循环（产品语义：无 WiFi 降级可用，
+		 * 板上音频/表达/记忆照跑；TRANSIENT——C5 恢复方案见
+		 * docs/hosted3-升级与C5恢复-2026-10-29.md） */
+		int rc_link = esp_hosted_connect_to_slave();
+
+		if (rc_link != 0)
+			kf_log("VL,HOSTED,LINK_FAIL,rc=%d,degraded\r\n",
+			       rc_link);
 		kf_log("VL,HOSTED,init+link,%ums\r\n",
 		       (unsigned)((esp_timer_get_time() - t0) / 1000));
 	}
