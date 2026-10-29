@@ -22,7 +22,6 @@
 #include "esp_timer.h"
 
 #include "kaleido_speech.h"
-#include "sp_internal.h"
 
 #define MM_LLM_HOST	"https://api.minimaxi.com"
 #define MM_LLM_URLFMT	MM_LLM_HOST "/v1/text/chatcompletion_v2?GroupId=%s"
@@ -293,15 +292,17 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 	if (!cfg || !cfg->url || !cfg->api_key || !cfg->model ||
 	    !cfg->user_msg || !cb)
 		return -1;
-	if (!sp_sess_take(15000))	/* V-47：TTS/LLM 全组件单飞 */
-		return -6;
+	/* 无会话锁：本函数每调用独立 http 客户端、ctx 全栈内（无共享态）；
+	 * 且子句级流式早切要求 LLM 与 TTS 并发（V-44 早切架构）。
+	 * sp_sess 锁只保 TTS 单例（V-47 真问题：ks_tts_open 清 s_mm）。
+	 * 教训记录：曾把 chat 一并锁上→轮内 pump_tts_attach 持锁后
+	 * chat 自锁 15s 超时 -6→rc=-4 全轮失败（10-29 压测抓获） */
 
 	c.t0 = esp_timer_get_time();
 
 	/* 组请求体：system 可选；no_think 附 MiniMax thinking disabled */
 	root = cJSON_CreateObject();
 	if (!root) {
-		sp_sess_give();
 		return -1;
 	}
 	cJSON_AddStringToObject(root, "model", cfg->model);
@@ -325,7 +326,6 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 	s = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);
 	if (!s) {
-		sp_sess_give();
 		return -1;
 	}
 	if (strlen(s) >= sizeof(body))
@@ -347,7 +347,6 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 	};
 	cl = esp_http_client_init(&hc);
 	if (!cl) {
-		sp_sess_give();
 		return -1;
 	}
 	esp_http_client_set_header(cl, "Authorization", auth);
@@ -357,7 +356,6 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 	    esp_http_client_write(cl, body, strlen(body)) !=
 		    (int)strlen(body)) {
 		esp_http_client_cleanup(cl);
-		sp_sess_give();
 		return -1;
 	}
 	esp_http_client_fetch_headers(cl);
@@ -386,9 +384,7 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 		*first_token_us = c.first_token_us;
 	if (code != 200) {
 		ESP_LOGE(TAG, "http %d", code);
-		sp_sess_give();
 		return -2;
 	}
-	sp_sess_give();
 	return 0;
 }
