@@ -141,14 +141,24 @@ static void think_log(const char *ev, const char *detail)
 	kf_ev("ki", "%s %s", ev, detail);
 }
 
-/* LLM 整句收集回调（不切子句；溢出静默截尾——parse 会拒） */
+/* LLM 整句收集回调（不切子句）。游标必须随调用实例（缺陷 L 陪跑崩：
+ * 曾用 static size_t off 跨思维轮累计——reply[0]=0 清缓冲不清 off，
+ * 累计超 THINK_REPLY_MAX 后 size 下溢成无界写，静态区被回复文本碾过，
+ * 调度器任务列表损坏→Load access fault（MTVAL=文本碎片）。缓冲满
+ * 返回 false 中止流，parse 拒截尾 */
+struct think_reply {
+	char *buf;
+	size_t off;
+};
+
 static bool collect_cb(void *user, const char *sent, bool final)
 {
-	static size_t off;
-	char *buf = user;
+	struct think_reply *r = user;
 
 	(void)final;
-	off += strlcpy(buf + off, sent, THINK_REPLY_MAX - off);
+	if (r->off >= THINK_REPLY_MAX - 1)
+		return false;
+	r->off += strlcpy(r->buf + r->off, sent, THINK_REPLY_MAX - r->off);
 	return true;
 }
 
@@ -203,6 +213,7 @@ static void think_task(void *arg)
 {
 	static char prompt[896];
 	static char reply[THINK_REPLY_MAX];
+	struct think_reply rb = { .buf = reply, .off = 0 };
 
 	(void)arg;
 	for (;;) {
@@ -239,7 +250,7 @@ static void think_task(void *arg)
 	dl.system = prompt;
 	dl.user_msg = "（内心思考）";
 	dl.cut_clauses = false;
-	rc = ks_llm_chat(&dl, collect_cb, reply, NULL);
+		rc = ks_llm_chat(&dl, collect_cb, &rb, NULL);
 	if (rc != 0 || !reply[0]) {
 		think_log("LLMFAIL", "deliberation");
 		ki_settle2(KI_SETTLE_SILENT);
