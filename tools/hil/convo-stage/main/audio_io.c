@@ -125,8 +125,11 @@ bool aio_ref_get(int16_t *out, size_t n, uint32_t pos)
 		uint32_t p = (pos + off) & AIO_REF_MASK;
 		size_t m = n - off;
 
-		if (m > (uint32_t)(AIO_RING_MASK + 1) - p)
-			m = (uint32_t)(AIO_RING_MASK + 1) - p;
+		/* 缺陷 L：此封顶曾误用采音环的 AIO_RING_MASK（2^17）——
+		 * 参考环是 2^19，读位 p 恰落 2^17 时 m=0、off 永不前进，
+		 * wn_feed 死循环饿死整核（TWDT 连拍签名）。必须用本环宽度 */
+		if (m > (uint32_t)(AIO_REF_MASK + 1) - p)
+			m = (uint32_t)(AIO_REF_MASK + 1) - p;
 		memcpy(out + off, s_ref_ring + p, m * sizeof(int16_t));
 		off += m;
 	}
