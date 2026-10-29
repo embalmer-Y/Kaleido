@@ -283,7 +283,9 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 	struct ks_llm_ctx c = { .cb = cb, .user = user,
 				.cut_clauses = cfg ? cfg->cut_clauses : false };
 	char auth[768];		/* MiniMax JWT ~690B：192 会截断致 401 */
-	char body[1024];
+	char body[4096];	/* 哑音真凶修复：W2 动态注入 system prompt
+				 * (s_sys_dyn 2432B)+ASR 长文本下 1024B 必截断→JSON
+				 * 残缺→MiniMax 拒收→整轮静默（间歇性=注入长度） */
 	char *s;
 	cJSON *root, *msgs, *m;
 	esp_http_client_handle_t cl;
