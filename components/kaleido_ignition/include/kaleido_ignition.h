@@ -122,12 +122,14 @@ struct ki_think_ctx {
 	float score;            /* ki_step 五因子分（salient 输入）     */
 	float last_silent_score;/* 上轮沉默时分数（"新意"门基准）       */
 	bool last_was_silent;
+	float mem_hook;         /* W4 记忆钩子：km 语境 top1 分数（0=无库
+				 * /未接；>KI_MEM_HOOK_T 触发，plan §5R.5.6） */
 };
 
 struct ki_think_gate {
 	bool trigger;           /* 进思维轮（唯一"点火"语义）           */
 	uint8_t reason_mask;    /* bit0 idle 1 low_arousal 2 bin 3 salient
-				 * 4 new_event                         */
+				 * 4 new_event 5 mem_hook              */
 	uint8_t blocked_mask;   /* bit0 quiet 1 interval 2 daily_cap
 				 * 3 no_new_info                       */
 };

@@ -347,7 +347,8 @@ void convo_stop(void)
 static void speak_over_air(const char *text)
 {
 	if (ks_tts_open(s_tts, &(struct ks_tts_events){
-			.on_pcm = on_tts_pcm }) != 0) {
+			.on_pcm = on_tts_pcm,
+			.on_error = tts_err_telemetry }) != 0) {
 		ESP_LOGE(TAG, "soak tts open fail");
 		return;
 	}

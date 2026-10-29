@@ -32,6 +32,9 @@ void mem_round_record(const char *asr_text, int rc, int origin);
  * 返回空串=无库可注入（prompt 不加段） */
 const char *mem_prompt_block(void);
 
+/* W4→W3 记忆钩子（soul_mem_hook 注册用）：top1 分数 30s 节流 */
+float mem_hook_probe(void);
+
 /* 健康巡检（'u'）：水位/seq/覆盖表脏数，KF 单行落痕 */
 void mem_stats(void);
 

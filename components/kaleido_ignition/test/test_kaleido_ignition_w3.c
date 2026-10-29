@@ -47,6 +47,17 @@ static void think_gate_triggers(void)
 			.urgency_max = 0.9f, .pending_command = true,
 			.score = 0.49f, .now_min = 100 }, &g);
 	TEST_ASSERT_FALSE(g.trigger);
+
+	/* W4→W3 记忆钩子：top1≥0.5 独立触发（bit5）；低于阈不触发 */
+	ki_think_gate(&(struct ki_think_ctx){ .arousal = 0.9f,
+			.urgency_max = 0.9f, .pending_command = true,
+			.mem_hook = 0.5f, .now_min = 100 }, &g);
+	TEST_ASSERT_TRUE(g.trigger);
+	TEST_ASSERT_EQUAL_UINT8(1u << 5, g.reason_mask);
+	ki_think_gate(&(struct ki_think_ctx){ .arousal = 0.9f,
+			.urgency_max = 0.9f, .pending_command = true,
+			.mem_hook = 0.49f, .now_min = 100 }, &g);
+	TEST_ASSERT_FALSE(g.trigger);
 }
 
 static void think_gate_budget(void)

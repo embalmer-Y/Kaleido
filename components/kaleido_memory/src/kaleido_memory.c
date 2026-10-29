@@ -582,10 +582,16 @@ int km_query(const struct km_query *q, struct km_hit *hits, int top_n)
 int km_core_write(const char *json)
 {
 	FILE *f = fopen(s_path_core, "w");
+	size_t n;
 
 	if (!f)
 		return KM_ERR_IO;
+	n = strlen(json);
 	fputs(json, f);
+	/* core 与晋升条目同文件共存（JSONL 口径）：无尾换行会把下一
+	 * 条粘进行计数同一行（ promote 容量统计/重写裁剪皆错位） */
+	if (!n || json[n - 1] != '\n')
+		fputc('\n', f);
 	fclose(f);
 	return KM_OK;
 }
@@ -601,6 +607,75 @@ int km_core_read(char *buf, size_t bufsz)
 	buf[n] = '\0';
 	fclose(f);
 	return (int)n;
+}
+
+int km_core_promote(uint64_t src_seq, const char *fact)
+{
+	char clean[96];
+	FILE *f;
+	int lines = 0;
+	cJSON *root;
+	char *esc;
+
+	if (!src_seq || !fact || !fact[0])
+		return KM_ERR_ARG;
+	/* ①源在库核验（禁无源晋升——LineageBreak 精神） */
+	bool exists = false;
+
+	f = fopen(s_path_ep, "r");
+	if (f) {
+		char line[KM_LINE_MAX + 1];
+
+		while (!exists && fgets(line, sizeof(line), f)) {
+			cJSON *row = cJSON_Parse(line);
+			cJSON *v;
+
+			if (!row)
+				continue;
+			v = cJSON_GetObjectItem(row, "seq");
+			exists = v && cJSON_IsNumber(v) &&
+				  (uint64_t)v->valuedouble == src_seq;
+			cJSON_Delete(row);
+		}
+		fclose(f);
+	}
+	if (!exists)
+		return KM_PROTECTED;
+	/* 事实短句净化：单行、无控制字符（cJSON 编码前压平） */
+	strlcpy(clean, fact, sizeof(clean));
+	for (char *q = clean; *q; q++)
+		if ((unsigned char)*q < 0x20)
+			*q = ' ';
+	/* ④上限（满则提示云端合并重写） */
+	f = fopen(s_path_core, "r");
+	if (f) {
+		char line[KM_LINE_MAX + 1];
+
+		while (fgets(line, sizeof(line), f))
+			lines++;
+		fclose(f);
+	}
+	if (lines >= KM_CORE_MAX)
+		return KM_FULL;
+	root = cJSON_CreateObject();
+	if (!root)
+		return KM_ERR_IO;
+	cJSON_AddNumberToObject(root, "seq", (double)src_seq);
+	cJSON_AddNumberToObject(root, "t", (double)time(NULL));
+	cJSON_AddStringToObject(root, "fact", clean);
+	esc = cJSON_PrintUnformatted(root);
+	cJSON_Delete(root);
+	if (!esc)
+		return KM_ERR_IO;
+	f = fopen(s_path_core, "a");
+	if (!f) {
+		cJSON_free(esc);
+		return KM_ERR_IO;
+	}
+	fprintf(f, "%s\n", esc);
+	fclose(f);
+	cJSON_free(esc);
+	return lines + 1;
 }
 
 int km_backup(const char *backup_path)

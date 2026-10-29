@@ -40,6 +40,8 @@ bool pump_on_llm_sentence(void *user, const char *sentence, bool final);
 
 /* 本轮首个子句到达时刻（µs；未有为 0）——遥测用 */
 int64_t pump_first_clause_us(void);
+/* V-47：ks_tts_events.on_error 共用遥测出口（KF 单行+事件环） */
+void tts_err_telemetry(void *user, int stage, int code);
 /* 首子句文本（W4 记忆 facts[0]；pump_reset 后为空串） */
 void pump_first_clause(char *out, size_t n);
 

@@ -993,6 +993,7 @@ void app_main(void)
 	if (mem_boot() != 0)
 		ESP_LOGE(TAG, "mem boot fail（记忆降级，主流程继续）");
 	soul_prompt_ext_set(mem_prompt_block);/* W4：记忆块注入 prompt */
+	soul_mem_hook_set(mem_hook_probe);/* W4→W3：记忆钩子入思维闸 */
 
 	kf_log("VL,MEM,pre-wifi,int=%uk,ps=%uk\r\n",
 	       (unsigned)(heap_caps_get_free_size(

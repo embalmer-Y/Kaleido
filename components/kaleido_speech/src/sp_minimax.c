@@ -163,13 +163,24 @@ static void mm_byte(struct mm_parse *ps, char ch)
 	}
 }
 
+/* V-47 错误遥测：on_error 可 NULL；哑音/HTTP/中断统一出口 */
+static void err_report(int stage, int code)
+{
+	if (s_mm.ev.on_error)
+		s_mm.ev.on_error(s_mm.ev.user, stage, code);
+}
+
 int ks_tts_open(const struct ks_tts_cfg *cfg,
 		const struct ks_tts_events *ev)
 {
 	const char *key;
 
+	/* 会话互斥（V-47）：持锁至 close；忙=-6，调用方据此退避 */
+	if (!sp_sess_take(0))
+		return -6;
 	if (!cfg || !cfg->api_key || !cfg->api_key[0]) {
 		ESP_LOGE(TAG, "no cfg/api key (CONFIG_KS_MM_KEY)");
+		sp_sess_give();
 		return -1;
 	}
 	key = cfg->api_key;
@@ -180,6 +191,8 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 	if (sp_mm_group_id(key, s_mm.gid, sizeof(s_mm.gid)) != 0) {
 		ESP_LOGE(TAG, "parse GroupID from jwt fail");
 		s_mm.cfg = NULL;
+		err_report(KS_TTS_ERR_OPEN, -1);
+		sp_sess_give();
 		return -1;
 	}
 	ESP_LOGI(TAG, "minimax tts ready model=%s voice=%s",
@@ -264,6 +277,7 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 	cl = esp_http_client_init(&hc);
 	if (!cl) {
 		cJSON_free(body);
+		err_report(KS_TTS_ERR_LOCAL, -2);
 		return -2;
 	}
 	esp_http_client_set_header(cl, "Authorization", auth);
@@ -274,6 +288,7 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 		    (int)strlen(body)) {
 		esp_http_client_cleanup(cl);
 		cJSON_free(body);
+		err_report(KS_TTS_ERR_LOCAL, -2);
 		return -2;
 	}
 	cJSON_free(body);
@@ -291,6 +306,7 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 			ESP_LOGE(TAG, "t2a http %d", code);
 		}
 		esp_http_client_cleanup(cl);
+		err_report(KS_TTS_ERR_HTTP, -3);
 		return -3;
 	}
 
@@ -322,6 +338,7 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 	esp_http_client_cleanup(cl);
 	if (code != 200) {
 		ESP_LOGE(TAG, "t2a http %d", code);
+		err_report(KS_TTS_ERR_HTTP, -3);
 		return -3;
 	}
 	if (!complete) {
@@ -329,6 +346,13 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 		 * （M2 状态机据此决定重试/道歉话术，而非当成功） */
 		ESP_LOGE(TAG, "t2a stream cut incomplete");
 		ret = -4;
+		err_report(KS_TTS_ERR_CUT, -4);
+	}
+	/* 哑音签名（V-47）：200 完整收流但零 PCM——间歇哑音的唯一
+	 * 可观测形态，此前完全不可见；先让它落痕再谈根因 */
+	if (ret == 0 && !s_mm.first_pcm_us) {
+		ESP_LOGW(TAG, "t2a SILENT: 200 ok, 0 pcm bytes");
+		err_report(KS_TTS_ERR_SILENT, 0);
 	}
 	return ret;
 }
@@ -342,6 +366,7 @@ void ks_tts_close(void)
 {
 	/* 无会话状态：清 cfg 即可（也顺带解除 feed 的入口放行） */
 	s_mm.cfg = NULL;
+	sp_sess_give();		/* V-47：释放会话锁 */
 }
 
 #endif  /* CONFIG_KS_TTS_PROVIDER_MINIMAX */

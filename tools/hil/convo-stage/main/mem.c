@@ -25,16 +25,23 @@
 #define MEM_MOUNT	"/storage"
 #define MEM_EP_PATH	MEM_MOUNT"/episodes.jsonl"
 #define MEM_CORE_PATH	MEM_MOUNT"/core.json"
-#define MEM_REC_STK	4096		/* 静态内部栈：板级纪律      */
+#define MEM_REC_STK	6144		/* 静态内部栈：板级纪律（含 km_query
+				 * ~1.2KB 深栈：769B 行缓冲+cJSON） */
 #define MEM_Q_DEPTH	4
 #define MEM_BLOCK_MAX	1536		/* 注入块预算（30 号 §8.3 ≤400 汉字） */
 
 static QueueHandle_t s_q;
+#define MEM_HOOK_PROBE_S	30	/* 记忆钩子探测周期（s）          */
+static uint32_t s_hook_age;
+static volatile float s_hook_score;	/* recorder 写/soul 读：32bit
+					 * 对齐单写，RISC-V 天然原子   */
 static StaticTask_t s_rec_tcb;
 static StackType_t s_rec_stk[MEM_REC_STK];	/* 内部 RAM .bss   */
 static bool s_up;			/* 挂载+km 就绪             */
 
-/* ── UTF-8 边界安全裁剪（30 号 §8.2：不劈多字节） ── */
+/* ── UTF-8 边界安全裁剪（30 号 §8.2：不劈多字节） ──
+ * 规则：n 收缩到 src[n] 不再是续字节——多字节整字符要么完整保留
+ * 要么整字符丢弃；ASCII 恒边界。 */
 static void utf8_trim(const char *src, char *dst, size_t dstsz)
 {
 	size_t n = strlen(src);
@@ -42,10 +49,7 @@ static void utf8_trim(const char *src, char *dst, size_t dstsz)
 	if (n >= dstsz)
 		n = dstsz - 1;
 	while (n && (src[n] & 0xC0) == 0x80)
-		n--;			/* 回退续字节               */
-	if (n && (src[n - 1] & 0x80) && (src[n - 1] & 0xC0) != 0xC0 &&
-	    (src[n] & 0xC0) == 0x80)
-		n--;			/* 首字节被截：再退一步     */
+		n--;
 	memcpy(dst, src, n);
 	dst[n] = '\0';
 }
@@ -112,6 +116,19 @@ static void recorder_task(void *arg)
 				       km_count());
 		}
 		km_housekeeping();	/* 覆盖表脏条 1Hz 兜底落盘  */
+		/* W4→W3 记忆钩子探测：30s 节流（W4.1 整改：km_query 深
+		 * 栈严禁上 soul tick——曾致其 3KB PSRAM 栈溢出保育
+		 * 断言连环重启；探测归本任务=唯一合法 flash 触碰者） */
+		if (++s_hook_age >= MEM_HOOK_PROBE_S) {
+			struct km_hit hits[1];
+
+			s_hook_age = 0;
+			s_hook_score = km_count() > 0 &&
+				km_query(&(struct km_query){ 0 },
+					 hits, 1) > 0 ?
+				hits[0].score : 0.0f;
+			kf_log("KM,HOOK,score=%.2f\r\n", s_hook_score);
+		}
 	}
 }
 
@@ -254,6 +271,15 @@ void mem_stats(void)
 	       km_count(), km_cap(),
 	       (unsigned long long)km_seq_current(),
 	       (unsigned)(used / 1024), (unsigned)(total / 1024));
+}
+
+/* W4→W3 记忆钩子：返回 km_rec 30s 周期探测的 top1 分数缓存。
+ * 纯变量读——探测本体在 km_rec（内部栈）做，见 recorder_task。
+ * W4.1 整改记录：曾直接在 soul tick 上跑 km_query，769B 行缓冲+
+ * cJSON 深栈溢出其 3KB PSRAM 栈（Stack protection fault 连环重启） */
+float mem_hook_probe(void)
+{
+	return s_up ? s_hook_score : 0.0f;
 }
 
 int64_t mem_test_inject(void)

@@ -48,6 +48,11 @@ const char *soul_prompt_suffix(void); /* W2：九维→系统提示词尾段（�
 typedef const char *(*soul_prompt_ext_fn)(void);
 void soul_prompt_ext_set(soul_prompt_ext_fn fn);
 
+/* W4 记忆钩子 DI：返回 km 语境 top1 分数（0=无库；mem.c 提供 30s
+ * 节流缓存版——soul tick 为 1Hz，不可每拍全库扫描） */
+typedef float (*soul_mem_hook_fn)(void);
+void soul_mem_hook_set(soul_mem_hook_fn fn);
+
 struct ks_tts_cfg;
 struct ks_llm_cfg;
 /* W2 轮起手统一入口（评审 M-01/M-08 整改）：TTS hint 写入 + prompt

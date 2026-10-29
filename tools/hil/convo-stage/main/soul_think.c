@@ -28,6 +28,7 @@
 #include "kaleido_speech.h"
 #include "soul.h"
 #include "soul_think.h"
+#include "clause_pump.h"
 
 #define THINK_STACK		(16 * 1024)	/* 内部栈：TLS/HTTPS 深度 */
 #define THINK_PRIO		4
@@ -189,7 +190,8 @@ static void think_prompt(char *buf, size_t n)
 static bool speak_over_air(const char *text)
 {
 	if (ks_tts_open(s_tts, &(struct ks_tts_events){
-				.on_pcm = on_tts_pcm }) != 0)
+				.on_pcm = on_tts_pcm,
+				.on_error = tts_err_telemetry }) != 0)
 		return false;
 	ks_tts_feed(text, false, 15000);
 	ks_tts_feed(NULL, true, 15000);

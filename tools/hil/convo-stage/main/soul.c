@@ -205,10 +205,16 @@ void soul_snapshot(struct soul_snap *out)
 
 /* ---- W2 轮起手（评审 M-01 整改：基座缓存防逐轮累积） ---- */
 static soul_prompt_ext_fn s_prompt_ext;	/* W4：记忆块提供者（DI） */
+static soul_mem_hook_fn s_mem_hook;	/* W4：思维闸记忆钩子（DI） */
 
 void soul_prompt_ext_set(soul_prompt_ext_fn fn)
 {
 	s_prompt_ext = fn;		/* 启动期一次性注册，无并发 */
+}
+
+void soul_mem_hook_set(soul_mem_hook_fn fn)
+{
+	s_mem_hook = fn;
 }
 
 void soul_convo_bind(struct ks_tts_cfg *tts, struct ks_llm_cfg *llm)
@@ -346,6 +352,7 @@ static void soul_tick(void)
 			.bin_changed = s_bin_changed,
 			.new_event = false,     /* 由 soul_think 维护 */
 			.score = idec.score,
+			.mem_hook = s_mem_hook ? s_mem_hook() : 0.0f,
 		};
 
 		soul_think_gate_ctx(&tc);

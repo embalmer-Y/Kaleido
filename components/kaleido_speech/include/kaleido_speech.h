@@ -78,12 +78,25 @@ struct ks_tts_cfg {
 typedef void (*ks_tts_pcm_cb)(void *user, const uint8_t *pcm,
 			      size_t len);
 
+/* 错误遥测（V-47：哑音可见化）。stage=KS_TTS_ERR_*，code=本次
+ * ks_tts_* 返回码；KS_TTS_ERR_SILENT=哑音签名（HTTP 200 但零 PCM） */
+enum ks_tts_err {
+	KS_TTS_ERR_OPEN = 1,	/* open 参数/协议失败               */
+	KS_TTS_ERR_LOCAL = 2,	/* feed 本地失败                    */
+	KS_TTS_ERR_HTTP = 3,	/* feed HTTP 非 200                 */
+	KS_TTS_ERR_CUT = 4,	/* 流中断（音频可能不完整）         */
+	KS_TTS_ERR_SILENT = 5,	/* 哑音：成功返回但全程零 PCM       */
+};
+typedef void (*ks_tts_err_cb)(void *user, int stage, int code);
+
 struct ks_tts_events {
 	void *user;
 	ks_tts_pcm_cb on_pcm;
+	ks_tts_err_cb on_error;	/* 可 NULL（无遥测）                */
 };
 
-/* 返回 0 成功；-1 参数/缺 key；-2 协议失败（provider 实现各异） */
+/* 返回 0 成功；-1 参数/缺 key；-2 协议失败（provider 实现各异）；
+ * -6 会话忙（provider 互斥锁，V-47：think/round 并发拆台防护） */
 int ks_tts_open(const struct ks_tts_cfg *cfg,
 		const struct ks_tts_events *ev);
 /*

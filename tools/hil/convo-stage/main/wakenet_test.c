@@ -26,6 +26,7 @@
 #include "model_path.h"
 
 #include "audio_io.h"
+#include "clause_pump.h"
 #include "convo_fsm.h"
 #include "kaleido_core.h"
 #include "kaleido_speech.h"
@@ -173,6 +174,7 @@ static void announce_task(void *arg)
 		 * 每轮独立会话（自验场景多花 ~0.5s 开销可接受） */
 		if (ks_tts_open(cfg, &(struct ks_tts_events){
 				.on_pcm = on_tts_pcm,
+				.on_error = tts_err_telemetry,
 			}) != 0) {
 			kf_log("VL,WN,ERROR=tts_open,i=%d\r\n", i);
 			vTaskDelay(pdMS_TO_TICKS(3000));

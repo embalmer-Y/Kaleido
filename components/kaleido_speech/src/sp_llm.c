@@ -293,13 +293,17 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 	if (!cfg || !cfg->url || !cfg->api_key || !cfg->model ||
 	    !cfg->user_msg || !cb)
 		return -1;
+	if (!sp_sess_take(15000))	/* V-47：TTS/LLM 全组件单飞 */
+		return -6;
 
 	c.t0 = esp_timer_get_time();
 
 	/* 组请求体：system 可选；no_think 附 MiniMax thinking disabled */
 	root = cJSON_CreateObject();
-	if (!root)
+	if (!root) {
+		sp_sess_give();
 		return -1;
+	}
 	cJSON_AddStringToObject(root, "model", cfg->model);
 	cJSON_AddBoolToObject(root, "stream", true);
 	if (cfg->no_think) {
@@ -320,8 +324,10 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 	cJSON_AddItemToArray(msgs, m);
 	s = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);
-	if (!s)
+	if (!s) {
+		sp_sess_give();
 		return -1;
+	}
 	if (strlen(s) >= sizeof(body))
 		ESP_LOGW(TAG, "请求体超%uB截断（ASR 文本过长?）",
 			 (unsigned)sizeof(body));
@@ -340,8 +346,10 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 		.user_data = &c,
 	};
 	cl = esp_http_client_init(&hc);
-	if (!cl)
+	if (!cl) {
+		sp_sess_give();
 		return -1;
+	}
 	esp_http_client_set_header(cl, "Authorization", auth);
 	esp_http_client_set_header(cl, "Content-Type", "application/json");
 
@@ -349,6 +357,7 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 	    esp_http_client_write(cl, body, strlen(body)) !=
 		    (int)strlen(body)) {
 		esp_http_client_cleanup(cl);
+		sp_sess_give();
 		return -1;
 	}
 	esp_http_client_fetch_headers(cl);
@@ -377,7 +386,9 @@ int ks_llm_chat(const struct ks_llm_cfg *cfg, ks_llm_sent_cb cb, void *user,
 		*first_token_us = c.first_token_us;
 	if (code != 200) {
 		ESP_LOGE(TAG, "http %d", code);
+		sp_sess_give();
 		return -2;
 	}
+	sp_sess_give();
 	return 0;
 }

@@ -175,6 +175,26 @@ int main(void)
 	assert(km_append(&e) == 7);
 	assert(km_count() == 7);
 
+	/* ── W4.5：core 晋升（带源/append-only/上限）── */
+	int pn = km_core_promote(1, "用户的本周项目评审已结束");
+	assert(pn == 2);		/* core 已有 persona 一行 */
+	assert(km_core_read(buf, sizeof(buf)) > 0);
+	assert(strstr(buf, "评审已结束") && strstr(buf, "\"seq\":1"));
+	assert(km_core_promote(999, "无源晋升") == KM_PROTECTED);
+	assert(km_core_promote(0, "") == KM_ERR_ARG);
+	for (int i = pn; i < KM_CORE_MAX; i++) {
+		char f[64];
+
+		snprintf(f, sizeof(f), "事实填充第%d条", i);
+		assert(km_core_promote(2, f) == i + 1);
+	}
+	assert(km_core_promote(2, "超上限") == KM_FULL);
+	/* 重载后 core 持久 */
+	assert(km_init("/tmp/v33/kmtest/ep.jsonl",
+		       "/tmp/v33/kmtest/core.json") == 0);
+	assert(km_core_read(buf, sizeof(buf)) > 0);
+	assert(strstr(buf, "评审已结束"));
+
 	printf("KM_HOST_TEST,PASS,seq=%llu\n",
 	       (unsigned long long)km_seq_current());
 	return 0;

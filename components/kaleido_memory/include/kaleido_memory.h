@@ -41,6 +41,8 @@ extern "C" {
 #define KM_TAGS_MAX	6
 #define KM_QUERY_TOP	5
 #define KM_CAP_DEFAULT	1500	/* 30 号 §8.4：960KB 分区纪律 */
+#define KM_CORE_MAX	100	/* 30 号 §8.1 API-3：core 上限，满则提示
+				 * 云端合并（LLM 重写，用户可见可删）  */
 
 /* km_append / km_core_* 返回码 */
 #define KM_OK		 0
@@ -103,6 +105,12 @@ float km_effective_strength(const struct km_episode *ep, time_t now);
 /* 显式遗忘：tombstone 追加留痕（<ep>.tmb），检索默认排除；幂等。
  * 不删主行。KM_PROTECTED=seq 不在库。 */
 int km_forget(uint64_t seq, const char *reason);
+
+/* W4.5 晋升 core（30 号 §8.1 API-3）：①源 seq 必须在库（禁无源晋升）
+ * ②core 为 JSONL 追加（append-only，源情节不删不改）③条目受保护
+ * （km_forget 只作用于 episodic）④满 KM_FULL → 提示云端合并。
+ * fact 为事实短句（内部 cJSON 编码落行，≤96B）。返回 core 行数。 */
+int km_core_promote(uint64_t src_seq, const char *fact);
 
 /* 容量水位（V-48e 健康巡检项）：当前条数 / 上限（可调） */
 int km_count(void);

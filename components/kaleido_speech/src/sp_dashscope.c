@@ -8,6 +8,7 @@
  *  - ASR 定稿标志 = output.sentence.sentence_end（V-33 §3，非 output.type）
  */
 #include "kaleido_speech.h"
+#include "sp_internal.h"
 
 #include <string.h>
 
@@ -518,6 +519,8 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 		return -1;
 	if (s_tts)
 		return -1;
+	if (!sp_sess_take(0))	/* V-47 会话互斥 */
+		return -6;
 	s_tts = calloc(1, sizeof(*s_tts));
 	if (!s_tts)
 		return -1;
@@ -631,8 +634,10 @@ int64_t ks_tts_first_pcm_us(void)
 
 void ks_tts_close(void)
 {
-	if (!s_tts)
+	if (!s_tts) {
+		sp_sess_give();	/* 防御：open 失败路径的配对释放 */
 		return;
+	}
 	s_tts->closing = true;
 	if (s_tts->ws) {
 		esp_websocket_client_close(s_tts->ws,
@@ -646,5 +651,6 @@ void ks_tts_close(void)
 	vSemaphoreDelete(s_tts->finished);
 	free(s_tts);
 	s_tts = NULL;
+	sp_sess_give();		/* V-47：正常 close 路径配对释放 */
 }
 #endif  /* !CONFIG_KS_TTS_PROVIDER_MINIMAX */

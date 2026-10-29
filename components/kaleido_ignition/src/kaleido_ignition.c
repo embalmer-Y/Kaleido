@@ -140,6 +140,11 @@ uint16_t ki_cooldown_current(void)
 
 /* ---- W3：思维触发闸（纯函数；全部状态由 ctx 供给，评审 C3 纪律） ---- */
 
+#ifndef KI_MEM_HOOK_T
+#define KI_MEM_HOOK_T	0.5f	/* km 检索 top1 触发阈（分数≤1.0：
+				 * recency 0.5 + strength 0.3 + 命中 0.2） */
+#endif
+
 void ki_think_gate(const struct ki_think_ctx *ctx,
 		   struct ki_think_gate *out)
 {
@@ -157,9 +162,11 @@ void ki_think_gate(const struct ki_think_ctx *ctx,
 		(idle ? 1u << 0 : 0) | (low_ar ? 1u << 1 : 0) |
 		(ctx->bin_changed ? 1u << 2 : 0) |
 		(salient ? 1u << 3 : 0) |
-		(ctx->new_event ? 1u << 4 : 0);
+		(ctx->new_event ? 1u << 4 : 0) |
+		(ctx->mem_hook >= KI_MEM_HOOK_T ? 1u << 5 : 0);
 	out->trigger = idle || low_ar || ctx->bin_changed || salient ||
-		       ctx->new_event;
+		       ctx->new_event ||
+		       ctx->mem_hook >= KI_MEM_HOOK_T;
 	if (!out->trigger)
 		return;
 

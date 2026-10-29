@@ -17,10 +17,19 @@
 #include "freertos/task.h"
 
 #include "clause_pump.h"
+#include "kaleido_core.h"
 #include "mood.h"
 #include "soul.h"
 
 static const char *TAG = "pump";
+
+/* V-47 TTS 错误遥测：四个 open 调用点共用的 on_error（哑音可见化） */
+void tts_err_telemetry(void *user, int stage, int code)
+{
+	(void)user;
+	kf_log("TTS,ERR,stage=%d,code=%d\r\n", stage, code);
+	kf_ev("tts", "err stage=%d code=%d", stage, code);
+}
 
 static QueueHandle_t s_q;
 static SemaphoreHandle_t s_done;
@@ -89,6 +98,7 @@ int pump_tts_attach(const struct ks_tts_cfg *cfg, ks_tts_pcm_cb on_pcm)
 	/* MiniMax 的 open 只是解析 JWT（µs 级）；DashScope 构建下此处
 	 * 同步付出 ~2.8s 冷建连（原 prewarm 任务曾把它藏进采音窗，
 	 * 抽模块后从简——DashScope 回归时再议） */
+	ev.on_error = tts_err_telemetry;
 	if (ks_tts_open(cfg, &ev) != 0) {
 		ESP_LOGE(TAG, "tts attach fail");
 		return -1;
