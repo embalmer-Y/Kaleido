@@ -37,6 +37,7 @@
 extern void on_tts_pcm(void *user, const uint8_t *pcm, size_t len);
 extern size_t pb_pending(void);
 extern int64_t voice_first_audio_us(void);
+extern int64_t voice_tts_first_pcm_us(void);
 extern void voice_round_ts_reset(void);
 /* 内置语音（'t'/'a' 已证过空气可被 ASR 转写）：soak 用它扮演"用户
  * 提问"——避免 TTS 与 ASR WS 双 TLS 并发（实测该并发把内部 RAM 打穿：
@@ -48,7 +49,10 @@ static const char *TAG = "convo";
 
 #define LISTEN_MIN_MS	3000	/* 最短采音窗（防抢话截断） */
 #define LISTEN_MAX_MS	12000	/* 最长采音窗 */
-#define VAD_SILENCE_MS	1200	/* 说话后连续静音即提前截断 */
+#define VAD_SILENCE_MS	1000	/* 说话后连续静音即提前截断（1200→1000
+				 * 延迟优化①：感知延迟直降 200ms；误切
+				 * 风险由 LISTEN_MIN_MS + ASR 早切组合
+				 * （final+partial）兜底，真实使用复验） */
 #define VAD_CHUNK	1600	/* 100ms @16k */
 
 static volatile enum convo_state s_state = CONVO_OFF;
@@ -211,6 +215,7 @@ static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 {
 	int64_t speech_ms = 0;
 	int64_t t_cut;
+	int64_t t_asr0, ftok = 0, asr_open_ms;
 	int rc = 0;
 
 	s_text[0] = '\0';
@@ -218,6 +223,7 @@ static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 	s_full[0] = '\0';
 	pump_reset();
 
+	t_asr0 = esp_timer_get_time();
 	if (ks_asr_open(s_asr, &(struct ks_asr_events){
 			.on_text = on_asr_text }) != 0) {
 		vTaskDelay(pdMS_TO_TICKS(1000));	/* WS 偶发失联重试一次 */
@@ -225,6 +231,7 @@ static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 				.on_text = on_asr_text }) != 0)
 			return -1;
 	}
+	asr_open_ms = (esp_timer_get_time() - t_asr0) / 1000;
 	listen_capture(&speech_ms);
 	if (speech_ms_out)
 		*speech_ms_out = speech_ms;
@@ -252,7 +259,7 @@ static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 	if (pump_tts_attach(s_tts, on_tts_pcm) != 0)
 		return -5;
 	s_llm->user_msg = s_full;
-	rc = ks_llm_chat(s_llm, pump_on_llm_sentence, NULL, NULL);
+	rc = ks_llm_chat(s_llm, pump_on_llm_sentence, NULL, &ftok);
 	if (!pump_stop(30000))
 		ESP_LOGW(TAG, "pump not done in 30s");
 
@@ -264,6 +271,22 @@ static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 	if (cut2audio_ms)
 		*cut2audio_ms = voice_first_audio_us() ?
 			(voice_first_audio_us() - t_cut) / 1000 : -1;
+	{
+		/* 延迟分解打点（延迟优化②）：asr_open=唤醒后 WSS 建连
+		 * （在 t_cut 前，计入感知不计入 cut2audio）；ftok=LLM
+		 * 建连+首 token（自请求起点）；c1=截断→首子句；
+		 * ttspcm=截断→TTS 首包 PCM；cut2audio=截断→扬声器首音。
+		 * 目标：定位 4.4s 基线的大头后再决定连接层动刀点 */
+		int64_t c1 = pump_first_clause_us();
+		int64_t tp = voice_tts_first_pcm_us();
+
+		kf_log("VL,CONVO,LAT,rc=%d,asr_open=%lld,ftok=%lld,"
+		       "c1=%lld,ttspcm=%lld,cut2audio=%lld\r\n",
+		       rc, asr_open_ms, ftok / 1000,
+		       c1 ? (c1 - t_cut) / 1000 : -1,
+		       tp ? (tp - t_cut) / 1000 : -1,
+		       cut2audio_ms ? *cut2audio_ms : -1);
+	}
 	if (rc != 0)
 		return -4;
 	return 0;

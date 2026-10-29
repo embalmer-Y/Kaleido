@@ -79,10 +79,10 @@ static void feed_task(void *arg)
 		vTaskDelete(NULL);
 		return;
 	}
-	/* 阈值下调（出厂 0.63）：真人声 -45.8 勉强触发、自播报 -8dB
-	 * 不触发=模型置信度边际（上游 #214 同症）。桌搭优先可唤醒性 */
+	/* 阈值 0.35（V-46 沿用值；mono 路径下 -44dB 真人声全命中，余量
+	 * 充足——0.05 探底值已完成历史使命回滚） */
 	s_afe->set_wakenet_threshold(s_afe_data, 0, 0.35f);
-	kf_log("VL,WN,FEED,chunk=%d,aec=fd,thresh=0.35\r\n", chunk);
+	kf_log("VL,WN,FEED,chunk=%d,mono40,thresh=0.35\r\n", chunk);
 	uint32_t feed_dbg = 0;
 	/* 核 0 喂音 / 核 1 检测（创建处绑核）。静音窗口撤销（V-46c 终局
 	 * ——FD_LOW_COST 实现分支绕开 SR 档 FFT 病理，杀手 soak 10/10）：
@@ -92,6 +92,19 @@ static void feed_task(void *arg)
 
 		if (n < chunk)
 			memset(mic + n, 0, (chunk - n) * sizeof(int16_t));
+#if WN_V40_MONO
+		/* M 单声道：无参考通道，直接喂麦 */
+		if (kf_dbg_get() && ++feed_dbg % 25 == 0) {
+			int64_t sq = 0;
+
+			for (int i = 0; i < chunk; i++)
+				sq += (int32_t)mic[i] * mic[i];
+			kf_log("WN,DBGIN,n=%d,rms=%.1f,mono40", chunk,
+			       sqrtf((float)sq / chunk));
+		}
+		s_afe->feed(s_afe_data, mic);
+		continue;
+#endif
 		int32_t off = aec_align_offset();
 
 		if (off < 0)
@@ -103,14 +116,18 @@ static void feed_task(void *arg)
 		memcpy(buf, mic, chunk * 2);
 		memcpy(buf + chunk, ref, chunk * 2);
 		/* 调试仪表：喂入侧 RMS（与 detect 侧 DBGVOL 对账，分界
-		 * AFE 内外） */
+		 * AFE 内外）；ref=RMS 参考通道（唤醒修复验证：静默期应
+		 * 为 0，若持续非零=冻结窗口残影仍在） */
 		if (kf_dbg_get() && ++feed_dbg % 25 == 0) {
-			int64_t sq = 0;
+			int64_t sq = 0, rq = 0;
 
-			for (int i = 0; i < chunk; i++)
+			for (int i = 0; i < chunk; i++) {
 				sq += (int32_t)mic[i] * mic[i];
-			kf_log("WN,DBGIN,n=%d,rms=%.1f", chunk,
-			       sqrtf((float)sq / chunk));
+				rq += (int32_t)ref[i] * ref[i];
+			}
+			kf_log("WN,DBGIN,n=%d,rms=%.1f,ref=%.1f", chunk,
+			       sqrtf((float)sq / chunk),
+			       sqrtf((float)rq / chunk));
 		}
 		s_afe->feed(s_afe_data, buf);
 	}
@@ -127,9 +144,19 @@ static void detect_task(void *arg)
 		if (!r)
 			continue;
 		/* 调试仪表（'v' 态）：每 50 块报 wakenet 实际听到的响度，
-		 * 区分"音频未达检测"与"模型不识别" */
+		 * 区分"音频未达检测"与"模型不识别"；out=AFE 输出 RMS
+		 * （模型真正吃的数据——唤醒回归排查 2026-10-29：输入侧
+		 * data_volume 正常而 0.05 阈值零触发，需分辨 AEC/NLP 是否
+		 * 在输出侧吞掉一切） */
 		if (kf_dbg_get() && ++dbg_n % 50 == 0) {
-			kf_log("WN,DBGVOL,vol=%.1f", r->data_volume);
+			int64_t osq = 0;
+			int on = r->data_size / 2;
+
+			for (int i = 0; i < on; i++)
+				osq += (int32_t)r->data[i] * r->data[i];
+			kf_log("WN,DBGVOL,vol=%.1f,out=%.1f,n=%d",
+			       r->data_volume,
+			       on ? sqrtf((float)osq / on) : -1.0f, on);
 		}
 		if (r->wakeup_state != WAKENET_DETECTED)
 			continue;
@@ -247,6 +274,17 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	 * 打断管线保留（pb/TX 中止+路由），AEC 修复即配置翻转 */
 	/* V-46c 产品态（37b2d2ae 验证）：MR + FD_LOW_COST——真免疫 0/10，
 	 * 常驻无静音窗；FD 分支绕开 SR 档 FFT 病理（追记#10） */
+	/* 【V-40 对照实验 2026-10-30 凌晨】：唤醒在 MR+AEC 路线下对真人
+	 * 全灭（四种参考状态 × 0.05 地板阈值均零触发），翻回 V-40 验证过
+	 * 真人全命中的 "M" 单声道无 AEC 配置做 A/B。若 M 模式唤醒成功
+	 * ⇒ MR+AEC 路线自 V-46 起从未在本板对真人有效（后续测试均按键
+	 * 驱动掩盖），产品决策：M 模式先行 + AEC 集成另修 */
+#define WN_V40_MONO 1
+#if WN_V40_MONO
+	afe_config_t *cfg = afe_config_init("M", models, AFE_TYPE_SR,
+					    AFE_MODE_HIGH_PERF);
+	cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+#else
 	afe_config_t *cfg = afe_config_init("MR", models, AFE_TYPE_SR,
 					    AFE_MODE_HIGH_PERF);
 
@@ -255,6 +293,7 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	cfg->aec_filter_length = 4;
 	cfg->aec_nlp_level = AEC_NLP_LEVEL_NORMAL;
 	cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+#endif
 	/* 无 afe_config_check：V-40 实证 9/10 命中的原版路径未调用它，
 	 * 其"修正"在本板配置下会破坏唤醒检测（V-46c 真人测试日 diff
 	 * 定位——与原版唯一实质差异即此行） */

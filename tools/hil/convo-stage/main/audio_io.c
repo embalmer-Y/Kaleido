@@ -121,6 +121,12 @@ bool aio_ref_get(int16_t *out, size_t n, uint32_t pos)
 
 	if (w - pos > (1u << (AIO_REF_ORDER - 1)))
 		return false;
+	/* 【回滚 2026-10-29 深夜】：此处的 250ms 新鲜度门限（写停滞即
+	 * 视为无参考→清零）实测让 FD_LOW_COST AEC 输出被削 ~30dB
+	 * （AFE 输出 RMS 10-235 vs 正常数千）——零参考下该 AEC 实现
+	 * 病态抑制，wakenet 0.05 地板阈值仍零触发。V-46c 验证态的
+	 * "冻结窗口继续喂"是有意行为：静默期维持滤波器状态。恢复原样，
+	 * AEC 与零参考的交互留待上游对质（esp-sr#214 同族）。 */
 	for (size_t off = 0; off < n; ) {
 		uint32_t p = (pos + off) & AIO_REF_MASK;
 		size_t m = n - off;
@@ -287,6 +293,12 @@ int aio_init(void)
 				      sizeof(int16_t), MALLOC_CAP_SPIRAM);
 	if (!s_ref_ring)
 		return -8;
+	/* 参考环清零（唤醒回归 2026-10-29 深夜定案）：不清零时首次播放
+	 * 前参考通道全程喂 PSRAM 上电垃圾（实测恒定 RMS≈19981），AEC
+	 * 拿垃圾参考把输出削到近静音，wakenet 地板阈值仍零触发。历史
+	 * "可用"是因为验证流程总是先播 TTS 把环暖过。零参考=静默，
+	 * 与"播放后冻结尾音继续喂"（V-46c 验证态）不冲突 */
+	memset(s_ref_ring, 0, (1u << AIO_REF_ORDER) * sizeof(int16_t));
 
 	esp_codec_dev_sample_info_t fs = {
 		.sample_rate = AIO_SR,

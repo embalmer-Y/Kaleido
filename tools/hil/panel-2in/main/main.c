@@ -144,8 +144,10 @@ void app_main(void)
 	ESP_ERROR_CHECK(esp_lcd_new_panel_co5300(s_io, &panel_cfg, &s_panel));
 	ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
 	ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-	/* 亮度渐进：AMOLED 直射，开机 30%防刺眼（bring-up 后再调） */
-	ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(s_panel, 30));
+	/* 亮度渐进：AMOLED 直射。初始 5%——点亮瞬态是峰值电流主力，
+	 * USB 供电新板曾把 3.3V 轨拉塌（Guru 后直接 POWERON=掉电复位
+	 * 循环）；bring-up 稳定后再调高 */
+	ESP_ERROR_CHECK(esp_lcd_panel_co5300_set_brightness(s_panel, 5));
 	ESP_LOGI(TAG, "CO5300 panel up, 460x460 RGB565, FPS test starts");
 
 	/* 5) 测试图循环：双 FB 轮换，每秒打 FPS */
