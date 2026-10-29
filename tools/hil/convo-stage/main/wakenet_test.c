@@ -21,6 +21,11 @@
 #include "soul.h"
 
 #include "esp_afe_config.h"
+
+/* AFE 模式开关（2026-10-30 唤醒回归结案）：1=V-40 "M" 单声道无 AEC
+ *（真人 6/6 实证）；0=MR+FD_LOW_COST AEC（对真人从未有效，等待
+ * 参考敏感性修复后重上）。文件级开关：feed/announce/日志语义联动 */
+#define WN_V40_MONO 1
 #include "esp_afe_sr_iface.h"
 #include "esp_afe_sr_models.h"
 #include "model_path.h"
@@ -182,6 +187,10 @@ static void detect_task(void *arg)
 			continue;	/* 会话进行中命中：防重触发 */
 		kf_log("VL,WN,WAKE,cnt=%d,lat_ms=%lld,vol=%.1f\r\n",
 		       s_wake_cnt, lat, r->data_volume);
+		if (s_selftest)
+			continue;	/* 自检命中：计数即止——mono 无 AEC，
+					 * 放行会触发 10 轮假对话（V-40
+					 * 时代 wakenet 未接 FSM 无此问题） */
 		if (s_on_wake)
 			s_on_wake();	/* 通知 FSM（免按键轮起点） */
 		xTaskCreatePinnedToCore(beep_play_task, "beep", 4096,
@@ -215,10 +224,16 @@ static void announce_task(void *arg)
 		vTaskDelay(pdMS_TO_TICKS(7000));
 	}
 	vTaskDelay(pdMS_TO_TICKS(1500));	/* 等尾音抵达检测 */
-	/* hits 语义（V-46c 反转）：设备自说的唤醒词应被 AEC 抑制，
-	 * hits=自唤醒泄漏率，越低越好（门禁 ≤1/10） */
+	/* hits 语义随 AFE 模式（2026-10-30）：mono（V-40 回退态）无 AEC
+	 * 自体抑制——TTS 回环应命中，hits=检测能力指标，越高越好
+	 * （V-40 门禁 ≥9/10）；MR+AEC 态才是"泄漏率，越低越好" */
+#if WN_V40_MONO
+	kf_log("VL,WN,SELFTEST,done,hits=%d/%d,hit=higher-better(mono)\r\n",
+	       s_wake_cnt - hits0, cycles);
+#else
 	kf_log("VL,WN,SELFTEST,done,hits=%d/%d,leak=lower-better\r\n",
 	       s_wake_cnt - hits0, cycles);
+#endif
 	s_selftest = false;
 	vTaskDelete(NULL);
 }
@@ -273,13 +288,10 @@ void wakenet_start(struct ks_tts_cfg *tts, bool selftest,
 	 * 待上游修复或下轮专攻。暂回 "M" 无 AEC + 静音窗（已证稳定），
 	 * 打断管线保留（pb/TX 中止+路由），AEC 修复即配置翻转 */
 	/* V-46c 产品态（37b2d2ae 验证）：MR + FD_LOW_COST——真免疫 0/10，
-	 * 常驻无静音窗；FD 分支绕开 SR 档 FFT 病理（追记#10） */
-	/* 【V-40 对照实验 2026-10-30 凌晨】：唤醒在 MR+AEC 路线下对真人
-	 * 全灭（四种参考状态 × 0.05 地板阈值均零触发），翻回 V-40 验证过
-	 * 真人全命中的 "M" 单声道无 AEC 配置做 A/B。若 M 模式唤醒成功
-	 * ⇒ MR+AEC 路线自 V-46 起从未在本板对真人有效（后续测试均按键
-	 * 驱动掩盖），产品决策：M 模式先行 + AEC 集成另修 */
-#define WN_V40_MONO 1
+	 * 常驻无静音窗；FD 分支绕开 SR 档 FFT 病理（追记#10）。
+	 * 2026-10-30 结案：该路线对真人从未有效（见文件头 WN_V40_MONO
+	 * 注释与 docs/唤醒回归排查结案）——现行产品态=mono，AEC 分支
+	 * 留作参考敏感性修复后回归 */
 #if WN_V40_MONO
 	afe_config_t *cfg = afe_config_init("M", models, AFE_TYPE_SR,
 					    AFE_MODE_HIGH_PERF);

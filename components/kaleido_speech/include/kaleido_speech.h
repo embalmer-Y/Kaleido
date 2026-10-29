@@ -111,6 +111,11 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms);
  * 注意：MiniMax 逐 feed 覆盖——统计口径是"本子句"，非全会话 */
 int64_t ks_tts_first_pcm_us(void);
 void ks_tts_close(void);
+/* 连接预热（延迟优化 2026-10-30）：轮起跑前后台调用，把 TLS 握手从
+ * 首子句关键路径挪走。MiniMax 实做（最小真实请求暖 keep-alive 连接，
+ * 跨轮存活）；DashScope 空实现。忙（-6）/失败均无害——feed 自带
+ * 冷路径回退 */
+int ks_tts_prewarm(const struct ks_tts_cfg *cfg);
 
 /* ---- LLM（流式对话） ---- */
 

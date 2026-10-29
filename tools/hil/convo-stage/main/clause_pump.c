@@ -97,11 +97,21 @@ int pump_tts_attach(const struct ks_tts_cfg *cfg, ks_tts_pcm_cb on_pcm)
 
 	/* MiniMax 的 open 只是解析 JWT（µs 级）；DashScope 构建下此处
 	 * 同步付出 ~2.8s 冷建连（原 prewarm 任务曾把它藏进采音窗，
-	 * 抽模块后从简——DashScope 回归时再议） */
+	 * 抽模块后从简——DashScope 回归时再议）。
+	 * -6 忙重试（2026-10-30）：TTS 预热任务持锁窗口（≤8s）与本
+	 * attach 可能竞态——短退避 ×6 覆盖预热排水的典型尾段 */
 	ev.on_error = tts_err_telemetry;
-	if (ks_tts_open(cfg, &ev) != 0) {
-		ESP_LOGE(TAG, "tts attach fail");
-		return -1;
+	{
+		int rc = ks_tts_open(cfg, &ev);
+
+		for (int i = 0; rc == -6 && i < 6; i++) {
+			vTaskDelay(pdMS_TO_TICKS(300));
+			rc = ks_tts_open(cfg, &ev);
+		}
+		if (rc != 0) {
+			ESP_LOGE(TAG, "tts attach fail");
+			return -1;
+		}
 	}
 	s_tts_open = true;
 	return 0;
@@ -143,7 +153,6 @@ bool pump_on_llm_sentence(void *user, const char *sentence, bool final)
 	(void)final;	/* 流结束哨兵由 pump_stop 统一下发 */
 
 	char work[CLAUSE_ITEM_BYTES + 32];	/* +mood 尾巴余量 */
-	size_t n;
 
 	if (!s_q)
 		return true;

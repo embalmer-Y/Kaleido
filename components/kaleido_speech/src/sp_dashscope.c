@@ -653,4 +653,11 @@ void ks_tts_close(void)
 	s_tts = NULL;
 	sp_sess_give();		/* V-47：正常 close 路径配对释放 */
 }
+
+int ks_tts_prewarm(const struct ks_tts_cfg *cfg)
+{
+	/* DashScope TTS 走常驻 WS（run-task 会话），预热无意义 */
+	(void)cfg;
+	return 0;
+}
 #endif  /* !CONFIG_KS_TTS_PROVIDER_MINIMAX */

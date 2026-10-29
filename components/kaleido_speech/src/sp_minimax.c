@@ -50,6 +50,41 @@ static struct {
 	int64_t first_pcm_us;
 } s_mm;
 
+/* 暖连接（延迟优化 2026-10-30）：t2a 每子句一次完整 TLS 是截断→首音
+ * 3.2s 基线中 ~1.3s 的大头。句柄跨 feed、跨轮存活（由 sp_sess 会话锁
+ * 串行化：open→close 持锁期间只有 feed 触碰它；轮间仅 prewarm 触碰）。
+ * 服务器若关连接：open/write 报错→清句柄按需重建（回退路径永远成立，
+ * 复用只是快路径）。HTTP keep-alive 由 esp_http_client 对同一句柄的
+ * 再次 open 自动生效。 */
+static esp_http_client_handle_t s_warm;
+
+/* 新建 t2a 客户端（feed 回退路径与 prewarm 共用；api_key 显式传入：
+ * prewarm 在会话外运行，s_mm.cfg 此时为 NULL） */
+static esp_http_client_handle_t mm_client_new(const char *url,
+					      const char *api_key,
+					      uint32_t timeout_ms)
+{
+	esp_http_client_config_t hc = {
+		.url = url,
+		.method = HTTP_METHOD_POST,
+		.timeout_ms = timeout_ms ? timeout_ms : 15000,
+		.crt_bundle_attach = esp_crt_bundle_attach,
+		.buffer_size = 2048,
+		.buffer_size_tx = 4096,
+	};
+	esp_http_client_handle_t cl = esp_http_client_init(&hc);
+
+	if (cl) {
+		char auth[768];		/* JWT ~690B，小缓冲截断即 401 */
+
+		snprintf(auth, sizeof(auth), "Bearer %s", api_key);
+		esp_http_client_set_header(cl, "Authorization", auth);
+		esp_http_client_set_header(cl, "Content-Type",
+					   "application/json");
+	}
+	return cl;
+}
+
 struct mm_parse {
 	bool in_hex;		/* 处于 audio hex 字段           */
 	int nib;		/* 待配对高半字节；-1 无；
@@ -203,7 +238,6 @@ int ks_tts_open(const struct ks_tts_cfg *cfg,
 int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 {
 	char url[160];
-	char auth[768];		/* JWT ~690B，小缓冲截断即 401 */
 	cJSON *root;
 	char *body;
 	esp_http_client_handle_t cl;
@@ -231,7 +265,6 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 
 	snprintf(url, sizeof(url), MM_HOST "/v1/t2a_v2?GroupId=%s",
 		 s_mm.gid);
-	snprintf(auth, sizeof(auth), "Bearer %s", s_mm.cfg->api_key);
 
 	root = cJSON_CreateObject();
 	if (!root)
@@ -266,30 +299,42 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 	if (!body)
 		return -2;
 
-	esp_http_client_config_t hc = {
-		.url = url,
-		.method = HTTP_METHOD_POST,
-		.timeout_ms = timeout_ms,
-		.crt_bundle_attach = esp_crt_bundle_attach,
-		.buffer_size = 2048,
-		.buffer_size_tx = 4096,
-	};
-	cl = esp_http_client_init(&hc);
-	if (!cl) {
-		cJSON_free(body);
-		err_report(KS_TTS_ERR_LOCAL, -2);
-		return -2;
+	/* 快路径：复用暖连接（免 TLS 握手）；失败即弃、新建重试一次 */
+	cl = s_warm;
+	if (cl) {
+		esp_http_client_set_url(cl, url);
+		if (esp_http_client_open(cl, strlen(body)) != ESP_OK) {
+			esp_http_client_cleanup(cl);
+			cl = NULL;
+			s_warm = NULL;
+		}
 	}
-	esp_http_client_set_header(cl, "Authorization", auth);
-	esp_http_client_set_header(cl, "Content-Type", "application/json");
+	if (!cl) {
+		cl = mm_client_new(url, s_mm.cfg->api_key, timeout_ms);
+		if (!cl) {
+			cJSON_free(body);
+			err_report(KS_TTS_ERR_LOCAL, -2);
+			return -2;
+		}
+	}
 
-	if (esp_http_client_open(cl, strlen(body)) != ESP_OK ||
-	    esp_http_client_write(cl, body, strlen(body)) !=
-		    (int)strlen(body)) {
+	if (esp_http_client_write(cl, body, strlen(body)) !=
+			(int)strlen(body)) {
+		/* 写失败：可能是复用连接的服务端半关——重建一次再试 */
 		esp_http_client_cleanup(cl);
-		cJSON_free(body);
-		err_report(KS_TTS_ERR_LOCAL, -2);
-		return -2;
+		if (s_warm == cl)
+			s_warm = NULL;
+		cl = mm_client_new(url, s_mm.cfg->api_key, timeout_ms);
+		if (!cl ||
+		    esp_http_client_open(cl, strlen(body)) != ESP_OK ||
+		    esp_http_client_write(cl, body, strlen(body)) !=
+			    (int)strlen(body)) {
+			if (cl)
+				esp_http_client_cleanup(cl);
+			cJSON_free(body);
+			err_report(KS_TTS_ERR_LOCAL, -2);
+			return -2;
+		}
 	}
 	cJSON_free(body);
 	esp_http_client_fetch_headers(cl);
@@ -335,7 +380,15 @@ int ks_tts_feed(const char *text, bool last, uint32_t timeout_ms)
 		complete = true;
 
 	code = esp_http_client_get_status_code(cl);
-	esp_http_client_cleanup(cl);
+	if (code == 200 && complete) {
+		/* 成功：保留句柄供下一子句/下一轮复用（keep-alive） */
+		s_warm = cl;
+	} else {
+		/* 失败路径：错误体/中断后连接状态不可信，弃之 */
+		esp_http_client_cleanup(cl);
+		if (s_warm == cl)
+			s_warm = NULL;
+	}
 	if (code != 200) {
 		ESP_LOGE(TAG, "t2a http %d", code);
 		err_report(KS_TTS_ERR_HTTP, -3);
@@ -364,9 +417,86 @@ int64_t ks_tts_first_pcm_us(void)
 
 void ks_tts_close(void)
 {
-	/* 无会话状态：清 cfg 即可（也顺带解除 feed 的入口放行） */
+	/* 无会话状态：清 cfg 即可（也顺带解除 feed 的入口放行）；
+	 * 暖连接 s_warm 有意跨轮存活 */
 	s_mm.cfg = NULL;
 	sp_sess_give();		/* V-47：释放会话锁 */
+}
+
+/* 连接预热（延迟优化 2026-10-30）：轮起跑前（采音期）后台调用。
+ * 目标=把 DNS+TCP+TLS+证书校验（实测 ~1.3s）从首子句关键路径挪走。
+ * 手法：对同一句柄发一次最小真实 t2a 请求（text="."，token 成本可
+ * 忽略）并完整排水——保证连接形态与生产请求一致（keep-alive 兼容），
+ * 顺带验证既有 s_warm 的存活性（服务器静默关闭则弃旧建新）。
+ * 忙（-6）= 本轮起跑竞态：直接放弃预热，feed 走冷路径，无害 */
+int ks_tts_prewarm(const struct ks_tts_cfg *cfg)
+{
+	char gid[48];
+	char url[160];
+	char body[384];
+	char buf[512];
+	esp_http_client_handle_t cl;
+	int64_t deadline;
+	int n;
+
+	if (!sp_sess_take(0))
+		return -6;
+	if (!cfg || !cfg->api_key || !cfg->api_key[0] ||
+	    sp_mm_group_id(cfg->api_key, gid, sizeof(gid)) != 0) {
+		sp_sess_give();
+		return -1;
+	}
+	snprintf(url, sizeof(url), MM_HOST "/v1/t2a_v2?GroupId=%s", gid);
+	/* 固定字段 snprintf（内容无转义需求，免 cJSON 依赖） */
+	snprintf(body, sizeof(body),
+		 "{\"model\":\"%s\",\"text\":\".\",\"stream\":true,"
+		 "\"voice_setting\":{\"voice_id\":\"%s\"},"
+		 "\"audio_setting\":{\"sample_rate\":%u,\"bit_rate\":32000,"
+		 "\"format\":\"pcm\",\"channel\":1}}",
+		 cfg->model, cfg->voice, (unsigned)cfg->sample_rate);
+
+	cl = s_warm;
+	if (cl) {
+		esp_http_client_set_url(cl, url);
+		if (esp_http_client_open(cl, strlen(body)) != ESP_OK) {
+			esp_http_client_cleanup(cl);
+			s_warm = cl = NULL;
+		}
+	}
+	if (!cl) {
+		cl = mm_client_new(url, cfg->api_key, 8000);
+		if (!cl) {
+			sp_sess_give();
+			return -2;
+		}
+	}
+	if (esp_http_client_write(cl, body, strlen(body)) !=
+			(int)strlen(body)) {
+		esp_http_client_cleanup(cl);
+		s_warm = NULL;
+		sp_sess_give();
+		return -2;
+	}
+	esp_http_client_fetch_headers(cl);
+	/* 排水至完成（字节丢弃：预热音频不进播放链）。8s 墙钟上限：
+	 * 采音窗 ≥3s 时本调用在首子句前完成；拖过头的收益本就归零 */
+	deadline = esp_timer_get_time() + 8000000;
+	while ((n = esp_http_client_read(cl, buf, sizeof(buf))) >= 0) {
+		if (n == 0 &&
+		    esp_http_client_is_complete_data_received(cl))
+			break;
+		if (esp_timer_get_time() >= deadline)
+			break;
+	}
+	if (esp_http_client_is_complete_data_received(cl) &&
+	    esp_http_client_get_status_code(cl) == 200) {
+		s_warm = cl;		/* 连接确认可用，留喂下一子句 */
+	} else {
+		esp_http_client_cleanup(cl);
+		s_warm = NULL;
+	}
+	sp_sess_give();
+	return 0;
 }
 
 #endif  /* CONFIG_KS_TTS_PROVIDER_MINIMAX */

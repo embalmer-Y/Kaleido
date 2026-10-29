@@ -115,6 +115,14 @@ static void asr_closer_task(void *arg)
 	vTaskDelete(NULL);
 }
 
+/* TTS 连接预热（延迟优化 2026-10-30）：采音窗内暖好 MiniMax keep-alive
+ * 连接。任何失败（含 -6 忙）静默放弃——feed 自带冷路径 */
+static void tts_prewarm_task(void *arg)
+{
+	ks_tts_prewarm(arg);
+	vTaskDelete(NULL);
+}
+
 static int rms_i16(const int16_t *p, size_t n)
 {
 	int64_t acc = 0;
@@ -129,6 +137,8 @@ static StackType_t *s_convo_stk;
 static StaticTask_t s_convo_tcb;
 static StackType_t *s_close_stk;
 static StaticTask_t s_close_tcb;
+static StackType_t *s_pre_stk;	/* TTS 预热任务栈槽（延迟优化） */
+static StaticTask_t s_pre_tcb;
 
 /* LISTENING 采音：边采边喂 ASR；VAD-lite（前 300ms 估底噪，说话后
  * 连续静音 VAD_SILENCE_MS 即收口）。返回喂入样本数 */
@@ -232,6 +242,11 @@ static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 			return -1;
 	}
 	asr_open_ms = (esp_timer_get_time() - t_asr0) / 1000;
+	/* TTS 预热（延迟优化 2026-10-30）：采音窗 3-12s 完全藏得住 TLS
+	 * 握手（~1.3s），首子句直达暖连接。栈 10240 与 wn_say 同款
+	 *（MiniMax HTTPS+TLS）；静态槽跨轮复用 */
+	kf_task_psram("tts_pre", 10240, tts_prewarm_task, s_tts, 4, 0,
+		      (void **)&s_pre_stk, &s_pre_tcb);
 	listen_capture(&speech_ms);
 	if (speech_ms_out)
 		*speech_ms_out = speech_ms;
