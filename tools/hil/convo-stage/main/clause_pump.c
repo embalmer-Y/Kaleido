@@ -98,14 +98,14 @@ int pump_tts_attach(const struct ks_tts_cfg *cfg, ks_tts_pcm_cb on_pcm)
 	/* MiniMax 的 open 只是解析 JWT（µs 级）；DashScope 构建下此处
 	 * 同步付出 ~2.8s 冷建连（原 prewarm 任务曾把它藏进采音窗，
 	 * 抽模块后从简——DashScope 回归时再议）。
-	 * -6 忙重试（2026-10-30）：TTS 预热任务持锁窗口（≤8s）与本
-	 * attach 可能竞态——短退避 ×6 覆盖预热排水的典型尾段 */
+	 * -6 忙重试（2026-10-30 review 修订）：预热持锁墙钟上限 8s，
+	 * 500ms×16=8s 全窗覆盖（正常 ~2s 即让路；超窗仍败=真异常） */
 	ev.on_error = tts_err_telemetry;
 	{
 		int rc = ks_tts_open(cfg, &ev);
 
-		for (int i = 0; rc == -6 && i < 6; i++) {
-			vTaskDelay(pdMS_TO_TICKS(300));
+		for (int i = 0; rc == -6 && i < 16; i++) {
+			vTaskDelay(pdMS_TO_TICKS(500));
 			rc = ks_tts_open(cfg, &ev);
 		}
 		if (rc != 0) {

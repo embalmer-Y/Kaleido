@@ -2,6 +2,15 @@
 
 ## 根因（上游 issue 证据链闭环）
 
+> **【定性修正 10-29 晚，以此为准】**：下列 ZCMP 归因**已被我方实证
+> 推翻**——C5 控制台抓包证明 v6.1 镜像可正常运行至 app_main。真因=
+> **出厂量产分区表**（esp_secure_cert@0xd000/nvs_key@0xf000/nvs@0x10000
+> 加密方案）与示例 nvs_flash_init 需求不匹配 → 0.7s abort 循环 →
+> SDIO 表现为"无应答"。全套烧写 v661（含配套 bootloader+分区表）即
+> 根治，已全链验证。ZCMP（#18886）对其他 v6.1 C5 项目仍可能真实存在，
+> 但与我方无涉——上游评论勘误待发。完整证据链见
+> docs/hosted3-升级与C5恢复-2026-10-29.md §4.5。
+
 **esp-idf#18886**：IDF 6.0.2/6.1-rc1 的 ESP32-C5 app 因 RISC-V ZCMP
 回归在进 app_main 前即崩（Interrupt WDT；修复 commit 104f8ff5 仅在
 master，未进 release/v6.1）。我方 C5 镜像=v6.1 构建 → 崩溃 →

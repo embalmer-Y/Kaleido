@@ -117,9 +117,14 @@ static void asr_closer_task(void *arg)
 
 /* TTS 连接预热（延迟优化 2026-10-30）：采音窗内暖好 MiniMax keep-alive
  * 连接。任何失败（含 -6 忙）静默放弃——feed 自带冷路径 */
+static volatile bool s_pre_busy;	/* 防 double-spawn：kf_task_psram
+					 * 栈槽静态复用，前一个未退时
+					 * 再 spawn=同栈双任务（踩踏） */
+
 static void tts_prewarm_task(void *arg)
 {
 	ks_tts_prewarm(arg);
+	s_pre_busy = false;
 	vTaskDelete(NULL);
 }
 
@@ -244,9 +249,13 @@ static int convo_round(int64_t *speech_ms_out, int64_t *cut2audio_ms)
 	asr_open_ms = (esp_timer_get_time() - t_asr0) / 1000;
 	/* TTS 预热（延迟优化 2026-10-30）：采音窗 3-12s 完全藏得住 TLS
 	 * 握手（~1.3s），首子句直达暖连接。栈 10240 与 wn_say 同款
-	 *（MiniMax HTTPS+TLS）；静态槽跨轮复用 */
-	kf_task_psram("tts_pre", 10240, tts_prewarm_task, s_tts, 4, 0,
-		      (void **)&s_pre_stk, &s_pre_tcb);
+	 *（MiniMax HTTPS+TLS）；静态槽跨轮复用；busy 门防空轮快速
+	 * 连发时上一预热未退的同栈 double-spawn */
+	if (!s_pre_busy) {
+		s_pre_busy = true;
+		kf_task_psram("tts_pre", 10240, tts_prewarm_task, s_tts, 4,
+			      0, (void **)&s_pre_stk, &s_pre_tcb);
+	}
 	listen_capture(&speech_ms);
 	if (speech_ms_out)
 		*speech_ms_out = speech_ms;
