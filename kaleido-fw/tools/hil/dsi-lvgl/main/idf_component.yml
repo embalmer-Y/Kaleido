@@ -1,0 +1,14 @@
+dependencies:
+  ## Required IDF version
+  idf:
+    version: '>=4.1.0'
+  espressif/esp_lvgl_port:
+    version: 2.7.*
+    public: true
+  lvgl/lvgl:
+    version: 9.4.*
+    public: true
+  # 30fps 需要 1.1.2 光栅化速度（0.15 实测约慢 1.5-2 倍）；
+  # pthread 渲染 + LVGL 合成并行（V-35R 架构）
+  espressif/thorvg: "^1.1.2"
+

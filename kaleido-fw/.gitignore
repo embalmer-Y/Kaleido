@@ -1,0 +1,7 @@
+build*/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+sdkconfig.local
+tools/hil/p4-bringup/backup/

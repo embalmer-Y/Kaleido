@@ -1,0 +1,32 @@
+# Kaleido C 代码格式化——Linux 内核风格预设
+# 事实源：kaleido-fw/docs/coding-style.md（constraints §6.3 v0.3）
+# 基准：Linux 内核树 tools/clang-format/.clang-format（适配）
+---
+BasedOnStyle: LLVM
+IndentWidth: 8
+TabWidth: 8
+UseTab: ForContinuationAndIndentation
+ColumnLimit: 80
+BreakBeforeBraces: Linux
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakAfterReturnType: None
+AlwaysBreakBeforeMultilineStrings: false
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignEscapedNewlines: Left
+AlignOperands: true
+AlignTrailingComments: true
+IndentCaseLabels: false
+IndentPPDirectives: None
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+PointerAlignment: Right
+ReflowComments: true
+SortIncludes: false
+SpaceAfterCStyleCast: false
+SpacesBeforeTrailingComments: 1

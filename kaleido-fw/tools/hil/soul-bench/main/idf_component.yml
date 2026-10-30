@@ -1,0 +1,5 @@
+dependencies:
+  espressif/thorvg: "^1.1.2"
+  espressif/cjson: "^1.7.2"
+  espressif/esp_jpeg: "^1.2.5"
+  idf: ">=5.1"

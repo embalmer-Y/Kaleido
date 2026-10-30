@@ -1,0 +1,56 @@
+# 本地补丁：espressif/esp-idf#19171（P4 共享 cache sync 引擎）
+# 上游机制确认：reset-before-stall 留在途同步；随后写回即 Store fault（PC 在 ROM）
+# 本地修复：stall 后轮询 CACHE_SYNC_CTRL_REG.sync_done(bit4) 排空再维护
+# 应用：git -C ~/esp/esp-idf apply 本文件
+# 移除：git -C ~/esp/esp-idf checkout -- components/esp_system/port/soc/esp32p4/system_internal.c
+diff --git a/components/esp_system/port/soc/esp32p4/system_internal.c b/components/esp_system/port/soc/esp32p4/system_internal.c
+index a310fa29..618f09fa 100644
+--- a/components/esp_system/port/soc/esp32p4/system_internal.c
++++ b/components/esp_system/port/soc/esp32p4/system_internal.c
+@@ -15,6 +15,7 @@
+ #include "riscv/rv_utils.h"
+ #include "esp_rom_serial_output.h"
+ #include "soc/gpio_reg.h"
++#include "soc/cache_reg.h"   /* LOCAL PATCH #19171: CACHE_SYNC_CTRL_REG */
+ #include "soc/soc_caps.h"
+ #include "esp_cpu.h"
+ #include "soc/rtc.h"
+@@ -163,6 +164,14 @@ static void IRAM_ATTR __attribute__((noinline, noreturn)) esp_restart_noos_inner
+     const uint32_t core_id = esp_cpu_get_core_id();
+ 
+     // Disable cache
++    /* LOCAL PATCH (Kaleido, 2026-10-28) — #19171: sync engine must be idle
++     * before cache maintenance (see esp_restart_noos). */
++    {
++        uint32_t timeout = 1000000;
++
++        while (!(REG_READ(CACHE_SYNC_CTRL_REG) & (1u << 4)) && --timeout) {
++        }
++    }
+ #if CONFIG_SPIRAM
+     Cache_WriteBack_All(CACHE_MAP_L1_DCACHE);
+ #endif
+@@ -230,8 +239,22 @@ void esp_restart_noos(void)
+ #if !CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE
+     const uint32_t core_id = esp_cpu_get_core_id();
+     const uint32_t other_core_id = (core_id == 0) ? 1 : 0;
+-    esp_cpu_reset(other_core_id);
++    /* LOCAL PATCH (Kaleido, 2026-10-28) — upstream espressif/esp-idf#19171:
++     * P4 shared cache-sync engine. reset-before-stall leaves an in-flight
++     * sync running on the other core; the next cache writeback then faults
++     * (store access fault, PC in ROM). Stall only, and poll the sync-done
++     * bit (Cache_Wait_Idle exists in ROM but is not exported by the ROM
++     * ld). Core resets happen at the end of esp_restart_noos_inner().
++     * Remove when upstream fix lands. */
+     esp_cpu_stall(other_core_id);
++    {
++        uint32_t timeout = 1000000;
++
++        /* sync_done RO bit4（1=完成）：等共享 sync 引擎排空 */
++        while (!(REG_READ(CACHE_SYNC_CTRL_REG) & (1u << 4)) &&
++               --timeout) {
++        }
++    }
+ #endif
+ 
+ #if SOC_WDT_SUPPORTED
