@@ -276,7 +276,7 @@ FDM（验证装配）→ SLA（验证外观细节）→ CNC/小批量（量产�
 |---|---|
 | `Kaleido/`（本仓库） | 立项与约束文档、调研（`docs/research/`）、ADR（`docs/adr/`）、门禁记录（`docs/gates/`）、变更记录（`docs/changes/`）、跨仓库路线图 |
 | `kaleido-hw/` | 硬件（见第 5 章） |
-| `kaleido-fw/` | 固件（见第 6 章） |
+| `kaleido-fw/` | 固件（见第 6 章）。**2026-10-30 归档时变更为本仓库子目录**（subtree 合并，完整提交史保留） |
 | `kaleido-mech/` | 结构件（见第 7 章） |
 
 ### 10.2 文档格式

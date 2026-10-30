@@ -2,7 +2,7 @@
 
 > **[已归档 2026-10-30]** 本项目已归档，后续将**并入 Tessera 并定制为框架模式**（负责人指示）。
 > 归档文档（终态基线/未结事项/资产清单/接手指南）：`docs/项目归档-Kaleido-2026-10-30.md`。
-> 归档 tag：根仓 `kaleido-archive-2026-10-30`、固件仓 `kaleido-fw-archive-2026-10-30`。
+> 归档 tag：`kaleido-archive-2026-10-30`、`kaleido-fw-archive-2026-10-30`（均在根仓；固件已并入 `kaleido-fw/` 子目录并发布 GitHub）。
 > 本文以下内容为归档时点的历史快照，不再更新（其中"当前阶段"停留在 2026-10-25 前后）。
 
 Kaleido 是一个开源硬件+固件项目：基于乐鑫 ESP32-S31 的**智能桌搭**（smart desktop companion），

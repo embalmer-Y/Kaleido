@@ -1,8 +1,7 @@
 # Kaleido 主仓 .gitignore
 
-# 独立子仓库（constraints §10.1 仓库规划；各自有 git 历史）
-# kaleido-fw: git log 见其仓库（M0 骨架→V-04 共 6+ commits）
-/kaleido-fw/
+# kaleido-fw 已并入本仓子目录（2026-10-30 归档时 subtree 合并，完整历史保留）；
+# 其构建产物/密钥由 kaleido-fw/.gitignore 继续覆盖（build*/、sdkconfig.local 等）
 
 # 上游钉版克隆（Apache-2.0；钉版 SHA 与补丁复原步骤见 docs/vendor-licenses.md 与 docs/vendor-restore.md）
 /vendor/
