@@ -305,8 +305,11 @@ int aio_init(void)
 		.channel = 2,
 		.bits_per_sample = 16,
 	};
-	/* 增益 42（V-46c：量化 wakenet9 对静音敏感，30→42 提升检测
-	 * 置信度；ASR 侧 paraformer 鲁棒不受影响） */
+	/* 增益 42（V-46c：量化 wakenet9 对静音敏感，30→42 提升检测置信度；
+	 * 真人 6/6 实证 @42）。30 增益实验（2026-10-30）：板载回环 0/10→
+	 * 2/10——42 的削顶只对近场机器音源成立，真人远场无碍；PC 扬声器
+	 * 验证链改走"音量窗口"方案（外放电平压到 -25~-35dB 干净区），
+	 * 产品增益保持 42 不动 */
 	esp_codec_dev_set_in_gain(s_in, 42.0);
 	esp_codec_dev_set_out_vol(s_out, 60.0);
 	esp_codec_dev_open(s_in, &fs);
