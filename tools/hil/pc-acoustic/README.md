@@ -7,18 +7,27 @@
 
 - `pc_voice.py` — MiniMax t2a_v2 合成 WAV（音色/音量/语速可调；
   密钥读 `/home/emb/key/minimax.txt`，绝不入库）
-- `sample/wake_slow.wav` — 唤醒词（tianmei 0.75x 慢速=命中率最高变体）
+- `sample/wake_auto.wav` — **标准自动唤醒音频**（female-shaonv @0.7x，
+  speech-2.5-hd）：10 连确认 **8/10 命中**（未中 2 次系前轮排干时序，
+  非音频缺陷）；未屏蔽首播命中率 ~100%
+- `sample/wake_slow.wav` — 备选（tianmei 0.75x，命中率略低）
 - `sample/question.wav` — 标准测试问题（对话轮用）
+- `wake_test.sh` — 自动唤醒测试（播放侧；串口抓取另配）
 
 ## 用法
 
 ```bash
-# 合成
-python3 pc_voice.py "你好小智" /tmp/wake.wav [vol0-100]
+# 自动唤醒测试（板子 READY 后；Master 55%）：
+tools/hil/pc-acoustic/wake_test.sh 5        # 播 5 次，28s 间隔
+# 归因统计（对串口抓取日志）：
+#   grep -a "WN,WAKE\|PLAY" capture.log 的相邻行即命中归属
 # 对话轮（PC 扮演用户）：板上发 'g'，6s 后播放问题
-# 播放务必强制模拟口（默认路由可能进 HDMI/耳机）：
 aplay -q -D plughw:0,0 /tmp/question.wav
 ```
+
+**唤醒播放协议**：命中会触发真实对话轮（LISTENING ~12s + 收尾），
+轮内命中被防重触发丢弃——**播放间隔 ≥28s**（或从日志确认回到 IDLE），
+否则统计被轮屏蔽污染（首筛矩阵 33% 假象的来源）。
 
 ## 能力边界（实测定案）
 
@@ -26,7 +35,7 @@ aplay -q -D plughw:0,0 /tmp/question.wav
 |---|---|
 | 对话轮全链（ASR 转写/LLM/TTS） | ✅ 可靠——ASR 一字不差 |
 | 电平标定（Master% → 板子收声 dB） | ✅ 45%≈-24dB / 98%≈-16dB（@增益42） |
-| 唤醒触发 | ⚠️ 机器音色边际（模型特性）：快语速 0/8，慢速变体 ~1/5；金标准仍是真人抽测 |
+| 唤醒触发（wake_auto.wav @28s 间隔） | ✅ **8/10**，可作无人值守回归 oracle |
 
 ## 坑位记录
 
